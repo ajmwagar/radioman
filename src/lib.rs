@@ -48,7 +48,7 @@ pub struct FrequencyRange {
 }
 
 impl FrequencyRange {
-    fn contains(&self, frequency_hz: u64) -> bool {
+    pub fn contains(&self, frequency_hz: u64) -> bool {
         self.minimum_hz <= frequency_hz && frequency_hz <= self.maximum_hz
     }
 
