@@ -1,6 +1,6 @@
 use radioman::{
-    ExperimentOutput, ExperimentRequest, RadioDescriptor, ServiceCommand, ServiceStatus,
-    SpectrumFrame,
+    DeviceIndex, ExperimentOutput, ExperimentRequest, PacketRadioDescriptor, RadioDescriptor,
+    RadioKind, ServiceCommand, ServiceStatus, SpectrumFrame,
 };
 use rustfft::{FftPlanner, num_complex::Complex32};
 use serde::Deserialize;
@@ -72,6 +72,7 @@ fn spawn_experiment(
             serde_json::to_string(&request.active_tuning())
                 .map_err(|e| format!("encode active tuning: {e}"))?,
         )
+        .arg(&request.rx.radio_id)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
@@ -149,23 +150,38 @@ fn serve(config_path: &str, socket_path: &str) -> Result<(), String> {
                         if experiment.start_at_ms == 0 {
                             experiment.start_at_ms = now_ms();
                         }
-                        let result = experiment.validate_for(&config.radio).and_then(|_| {
-                            if !matches!(experiment.output, ExperimentOutput::Spectrum { .. }) {
-                                return Err("unsupported experiment output on this backend".into());
-                            }
-                            if active
-                                .as_ref()
-                                .is_some_and(|v| overlaps(&v.request, &experiment))
-                                || queued.values().any(|v| overlaps(v, &experiment))
-                            {
-                                return Err("experiment overlaps an existing tuner claim".into());
-                            }
-                            if queued.contains_key(&experiment.rx.session_id) {
-                                return Err("duplicate experiment session id".into());
-                            }
-                            queued.insert(experiment.rx.session_id.clone(), experiment);
-                            Ok(())
-                        });
+                        let result = config
+                            .radio(&experiment.rx.radio_id)
+                            .and_then(|radio| {
+                                if !matches!(radio.kind, RadioKind::RtlSdr) {
+                                    return Err(
+                                        "this backend currently executes RTL-SDR experiments only"
+                                            .into(),
+                                    );
+                                }
+                                experiment.validate_for(radio)
+                            })
+                            .and_then(|_| {
+                                if !matches!(experiment.output, ExperimentOutput::Spectrum { .. }) {
+                                    return Err(
+                                        "unsupported experiment output on this backend".into()
+                                    );
+                                }
+                                if active
+                                    .as_ref()
+                                    .is_some_and(|v| overlaps(&v.request, &experiment))
+                                    || queued.values().any(|v| overlaps(v, &experiment))
+                                {
+                                    return Err(
+                                        "experiment overlaps an existing tuner claim".into()
+                                    );
+                                }
+                                if queued.contains_key(&experiment.rx.session_id) {
+                                    return Err("duplicate experiment session id".into());
+                                }
+                                queued.insert(experiment.rx.session_id.clone(), experiment);
+                                Ok(())
+                            });
                         service_status(&active, &queued, result.err())
                     }
                     Err(e) => service_status(
@@ -221,9 +237,37 @@ fn control(socket_path: &str, json: &str) -> Result<(), String> {
 struct Config {
     schema_version: u32,
     node_id: String,
-    radio: RadioDescriptor,
+    #[serde(default)]
+    radios: Vec<RadioDescriptor>,
+    #[serde(default)]
+    packet_radios: Vec<PacketRadioDescriptor>,
     iq_bind: String,
     iq_advertise: String,
+}
+
+impl Config {
+    fn radio(&self, id: &str) -> Result<&RadioDescriptor, String> {
+        self.radios
+            .iter()
+            .find(|radio| radio.id == id)
+            .ok_or_else(|| format!("unknown radio id {id}"))
+    }
+
+    fn rtl_radio(&self) -> Result<&RadioDescriptor, String> {
+        self.radios
+            .iter()
+            .find(|radio| matches!(radio.kind, RadioKind::RtlSdr))
+            .ok_or("no RTL-SDR is configured".into())
+    }
+
+    fn device_index(&self) -> DeviceIndex {
+        DeviceIndex {
+            schema_version: radioman::CONTRACT_VERSION,
+            node_id: self.node_id.clone(),
+            radios: self.radios.clone(),
+            packet_radios: self.packet_radios.clone(),
+        }
+    }
 }
 
 fn spectrum_bins(iq: &[u8], planner: &mut FftPlanner<f32>) -> Result<Vec<f32>, String> {
@@ -261,19 +305,27 @@ fn spectrum_bins(iq: &[u8], planner: &mut FftPlanner<f32>) -> Result<Vec<f32>, S
 
 fn receive_spectrum(
     config: &Config,
+    radio_id: Option<&str>,
     center_frequency_hz: u64,
     destination: SocketAddr,
     gain_db: f32,
     tuning: Option<radioman::ActiveTuning>,
 ) -> Result<(), String> {
     const SAMPLE_RATE: u32 = 2_048_000;
-    if !config.radio.frequency.contains(center_frequency_hz) {
+    let radio = match radio_id {
+        Some(id) => config.radio(id)?,
+        None => config.rtl_radio()?,
+    };
+    if !matches!(radio.kind, RadioKind::RtlSdr) {
+        return Err("spectrum backend currently supports RTL-SDR only".into());
+    }
+    if !radio.frequency.contains(center_frequency_hz) {
         return Err("spectrum center frequency is outside the configured radio range".into());
     }
     if !gain_db.is_finite() || !(0.0..=49.6).contains(&gain_db) {
         return Err("RTL-SDR gain must be between 0 and 49.6 dB".into());
     }
-    let serial = config.radio.serial.as_deref().unwrap_or("0");
+    let serial = radio.serial.as_deref().unwrap_or("0");
     let mut child = Command::new("rtl_sdr")
         .args([
             "-d",
@@ -343,13 +395,13 @@ fn receive_spectrum(
 
 impl Config {
     fn validate(&self) -> Result<(), String> {
-        if self.schema_version != radioman::CONTRACT_VERSION {
+        if self.schema_version != radioman::CONFIG_VERSION {
             return Err("unsupported Radioman config schema".into());
         }
         if self.node_id.trim().is_empty() || self.node_id.len() > radioman::MAX_ID_BYTES {
             return Err("invalid node id".into());
         }
-        self.radio.validate()?;
+        self.device_index().validate()?;
         if !valid_socket(&self.iq_bind) {
             return Err("iq_bind must be an IP:port socket".into());
         }
@@ -372,7 +424,7 @@ fn read_config(path: &str) -> Result<Config, String> {
 }
 
 fn mono_s16le_to_stereo_f32le(input: &[u8], output: &mut Vec<u8>) -> Result<(), String> {
-    if !input.len().is_multiple_of(2) {
+    if input.len() % 2 != 0 {
         return Err("rtl_fm produced a partial s16le sample".into());
     }
     output.clear();
@@ -391,13 +443,14 @@ fn receive_fm(
     pcm_destination: SocketAddr,
     gain_db: f32,
 ) -> Result<(), String> {
-    if !config.radio.frequency.contains(center_frequency_hz) {
+    let radio = config.rtl_radio()?;
+    if !radio.frequency.contains(center_frequency_hz) {
         return Err("FM center frequency is outside the configured radio range".into());
     }
     if !gain_db.is_finite() || !(0.0..=49.6).contains(&gain_db) {
         return Err("RTL-SDR gain must be between 0 and 49.6 dB".into());
     }
-    let serial = config.radio.serial.as_deref().unwrap_or("0");
+    let serial = radio.serial.as_deref().unwrap_or("0");
     let mut child = Command::new("rtl_fm")
         .args([
             "-d",
@@ -456,7 +509,21 @@ fn run() -> Result<(), String> {
     match args.as_slice() {
         [_, command, path] if command == "validate-config" => {
             let config = read_config(path)?;
-            println!("valid node={} radio={}", config.node_id, config.radio.id);
+            println!(
+                "valid node={} radios={} packet_radios={}",
+                config.node_id,
+                config.radios.len(),
+                config.packet_radios.len()
+            );
+            Ok(())
+        }
+        [_, command, path] if command == "device-index" => {
+            let config = read_config(path)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&config.device_index())
+                    .map_err(|error| format!("encode device index: {error}"))?
+            );
             Ok(())
         }
         [_, command, path, socket] if command == "serve" => serve(path, socket),
@@ -483,6 +550,7 @@ fn run() -> Result<(), String> {
         [_, command, path, frequency, destination]
         | [_, command, path, frequency, destination, _]
         | [_, command, path, frequency, destination, _, _]
+        | [_, command, path, frequency, destination, _, _, _]
             if command == "spectrum" =>
         {
             let config = read_config(path)?;
@@ -503,11 +571,12 @@ fn run() -> Result<(), String> {
                 .map(|value| serde_json::from_str(value))
                 .transpose()
                 .map_err(|error| format!("invalid active tuning: {error}"))?;
-            receive_spectrum(&config, frequency, destination, gain, tuning)
+            let radio_id = args.get(7).map(String::as_str);
+            receive_spectrum(&config, radio_id, frequency, destination, gain, tuning)
         }
         _ => Err(format!(
-            "usage:\n  {} validate-config CONFIG.toml\n  {} serve CONFIG.toml CONTROL_SOCKET\n  {} control CONTROL_SOCKET JSON\n  {} fm CONFIG.toml CENTER_HZ PCM_DEST [GAIN_DB]\n  {} spectrum CONFIG.toml CENTER_HZ UDP_DEST [GAIN_DB]",
-            args[0], args[0], args[0], args[0], args[0]
+            "usage:\n  {} validate-config CONFIG.toml\n  {} device-index CONFIG.toml\n  {} serve CONFIG.toml CONTROL_SOCKET\n  {} control CONTROL_SOCKET JSON\n  {} fm CONFIG.toml CENTER_HZ PCM_DEST [GAIN_DB]\n  {} spectrum CONFIG.toml CENTER_HZ UDP_DEST [GAIN_DB] [TUNING_JSON] [RADIO_ID]",
+            args[0], args[0], args[0], args[0], args[0], args[0]
         )),
     }
 }

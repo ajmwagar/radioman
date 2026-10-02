@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
 pub const CONTRACT_VERSION: u32 = 1;
+pub const CONFIG_VERSION: u32 = 2;
 pub const MAX_ID_BYTES: usize = 96;
 pub const SPECTRUM_CONTRACT: &str = "radioman.spectrum.v1";
 pub const MIN_SPECTRUM_BINS: usize = 64;
@@ -19,6 +20,82 @@ pub enum RadioKind {
     RtlSdr,
     HackRf,
     Other,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PacketRadioCapability {
+    Health,
+    Gnss,
+    Display,
+    LoraRx,
+    LoraTx,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PacketRadioDescriptor {
+    pub id: String,
+    pub label: String,
+    pub serial: String,
+    pub transport: String,
+    pub protocol: String,
+    pub capabilities: BTreeSet<PacketRadioCapability>,
+}
+
+impl PacketRadioDescriptor {
+    pub fn validate(&self) -> Result<(), String> {
+        validate_id("packet radio id", &self.id)?;
+        if self.label.trim().is_empty() || self.label.len() > 128 {
+            return Err("packet radio label must contain 1..=128 bytes".into());
+        }
+        if self.serial.trim().is_empty() || self.serial.len() > 128 {
+            return Err("packet radio serial must contain 1..=128 bytes".into());
+        }
+        if !self.transport.starts_with("/dev/serial/by-id/") {
+            return Err("packet radio transport must use a stable /dev/serial/by-id path".into());
+        }
+        validate_id("packet radio protocol", &self.protocol)?;
+        if self.capabilities.is_empty() {
+            return Err("packet radio must declare at least one capability".into());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeviceIndex {
+    pub schema_version: u32,
+    pub node_id: String,
+    pub radios: Vec<RadioDescriptor>,
+    pub packet_radios: Vec<PacketRadioDescriptor>,
+}
+
+impl DeviceIndex {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.schema_version != CONTRACT_VERSION {
+            return Err("unsupported device index schema".into());
+        }
+        validate_id("node id", &self.node_id)?;
+        if self.radios.is_empty() && self.packet_radios.is_empty() {
+            return Err("device index must contain at least one device".into());
+        }
+        let mut ids = BTreeSet::new();
+        for radio in &self.radios {
+            radio.validate()?;
+            if !ids.insert(&radio.id) {
+                return Err("device ids must be unique".into());
+            }
+        }
+        for modem in &self.packet_radios {
+            modem.validate()?;
+            if !ids.insert(&modem.id) {
+                return Err("device ids must be unique".into());
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]

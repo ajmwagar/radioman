@@ -1,6 +1,7 @@
 use radioman::{
-    Agent, ExperimentOutput, ExperimentRequest, FrequencyRange, IqStreamAnnouncement,
-    RadioDescriptor, RadioKind, RxRequest, SampleFormat, SessionPhase, SpectrumFrame, StopRequest,
+    Agent, DeviceIndex, ExperimentOutput, ExperimentRequest, FrequencyRange, IqStreamAnnouncement,
+    PacketRadioCapability, PacketRadioDescriptor, RadioDescriptor, RadioKind, RxRequest,
+    SampleFormat, SessionPhase, SpectrumFrame, StopRequest,
 };
 use std::collections::BTreeSet;
 
@@ -123,6 +124,44 @@ fn rtl_sdr_cannot_claim_transmit() {
         radio.validate().unwrap_err(),
         "RTL-SDR cannot advertise transmit capability"
     );
+}
+
+#[test]
+fn heterogeneous_devices_share_one_unique_index() {
+    let hackrf = RadioDescriptor {
+        id: "hackrf/78d063dc29876f67".into(),
+        kind: RadioKind::HackRf,
+        label: "Radioman HackRF One".into(),
+        serial: Some("000000000000000078d063dc29876f67".into()),
+        frequency: FrequencyRange {
+            minimum_hz: 1_000_000,
+            maximum_hz: 6_000_000_000,
+        },
+        sample_rates_hz: BTreeSet::from([2_000_000, 8_000_000, 10_000_000, 20_000_000]),
+        sample_formats: BTreeSet::from([SampleFormat::Cs8]),
+        receive: true,
+        transmit: false,
+    };
+    let modem = PacketRadioDescriptor {
+        id: "lora/48ca435bacc8".into(),
+        label: "Radioman T-Beam Supreme".into(),
+        serial: "48:CA:43:5B:AC:C8".into(),
+        transport:
+            "/dev/serial/by-id/usb-Espressif_USB_JTAG_serial_debug_unit_48:CA:43:5B:AC:C8-if00"
+                .into(),
+        protocol: "radioman-node.v1".into(),
+        capabilities: BTreeSet::from([PacketRadioCapability::Health]),
+    };
+    let mut index = DeviceIndex {
+        schema_version: 1,
+        node_id: "radioman-pi".into(),
+        radios: vec![rtl(), hackrf],
+        packet_radios: vec![modem],
+    };
+    index.validate().unwrap();
+
+    index.packet_radios[0].id = index.radios[0].id.clone();
+    assert_eq!(index.validate().unwrap_err(), "device ids must be unique");
 }
 
 #[test]

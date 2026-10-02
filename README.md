@@ -28,6 +28,13 @@ accepted transitions behind a narrow owner-side interface.
 - `IqStreamAnnouncement`
 - `SpectrumFrame` (`radioman.spectrum.v1`)
 - `RadioDescriptor`
+- `DeviceIndex` (SDRs plus packet-radio modems)
+
+`radioman device-index CONFIG.toml` emits the validated, provider-neutral
+inventory. Config schema 2 stores SDRs in `[[radios]]` and packet modems in
+`[[packet_radios]]`; device IDs are unique across both collections. An indexed
+HackRF does not imply transmit authority: transmit remains false until a
+separate safety-reviewed capability and host-local interlock exist.
 
 Bounded, decimated spectrum frames may travel through Unibus. Each frame carries
 one FFT power row; consumers derive its frequency axis, peaks, persistence, and
