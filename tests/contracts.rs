@@ -1,6 +1,6 @@
 use radioman::{
     Agent, FrequencyRange, IqStreamAnnouncement, RadioDescriptor, RadioKind, RxRequest,
-    SampleFormat, SessionPhase, StopRequest,
+    SampleFormat, SessionPhase, SpectrumFrame, StopRequest,
 };
 use std::collections::BTreeSet;
 
@@ -98,4 +98,27 @@ fn rtl_sdr_cannot_claim_transmit() {
         radio.validate().unwrap_err(),
         "RTL-SDR cannot advertise transmit capability"
     );
+}
+
+#[test]
+fn spectrum_is_bounded_and_frequency_axis_is_derived() {
+    let frame = SpectrumFrame {
+        schema_version: 1,
+        session_id: "adsb".into(),
+        generation: 2,
+        sequence: 10,
+        observed_at_ms: 1_000,
+        center_frequency_hz: 1_090_000_000,
+        span_hz: 2_000_000,
+        floor_dbfs: -100.0,
+        ceiling_dbfs: -10.0,
+        bins_dbfs: vec![-80.0; 1_000],
+    };
+    frame.validate().unwrap();
+    assert_eq!(frame.bin_frequency_hz(0), Some(1_089_001_000.0));
+    assert_eq!(frame.bin_frequency_hz(999), Some(1_090_999_000.0));
+
+    let mut unbounded = frame.clone();
+    unbounded.bins_dbfs = vec![0.0; 4_097];
+    assert!(unbounded.validate().is_err());
 }

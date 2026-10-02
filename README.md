@@ -26,10 +26,13 @@ accepted transitions behind a narrow owner-side interface.
 - `Command::StartRx` / `Command::Stop`
 - `ReceiverStatus`
 - `IqStreamAnnouncement`
+- `SpectrumFrame` (`radioman.spectrum.v1`)
 - `RadioDescriptor`
 
-Spectrum frames may later travel through Unibus when bounded and decimated.
-Raw IQ uses a direct `udp://` or `quic://` endpoint announced by Radioman.
+Bounded, decimated spectrum frames may travel through Unibus. Each frame carries
+one FFT power row; consumers derive its frequency axis, peaks, persistence, and
+waterfall history. Raw IQ uses a direct `udp://` or `quic://` endpoint announced
+by Radioman.
 
 ## Development
 
@@ -42,4 +45,3 @@ cargo run -- validate-config ../radioman-pi/config/radioman.toml
 The first hardware milestone is receive-only RTL-SDR. HackRF receive follows;
 transmit is a separate safety-reviewed capability with frequency/power limits,
 short leases, audit receipts, and a host-local enable interlock.
-

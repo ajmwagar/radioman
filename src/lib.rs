@@ -9,6 +9,9 @@ use std::collections::BTreeSet;
 
 pub const CONTRACT_VERSION: u32 = 1;
 pub const MAX_ID_BYTES: usize = 96;
+pub const SPECTRUM_CONTRACT: &str = "radioman.spectrum.v1";
+pub const MIN_SPECTRUM_BINS: usize = 64;
+pub const MAX_SPECTRUM_BINS: usize = 4_096;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -157,6 +160,61 @@ pub struct IqStreamAnnouncement {
     pub sample_rate_hz: u32,
     pub center_frequency_hz: u64,
     pub expires_at_ms: u64,
+}
+
+/// One bounded FFT power frame. Frequencies are derived from center/span and
+/// bin index; peaks and waterfall history are consumer-owned projections.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SpectrumFrame {
+    pub schema_version: u32,
+    pub session_id: String,
+    pub generation: u64,
+    pub sequence: u64,
+    pub observed_at_ms: u64,
+    pub center_frequency_hz: u64,
+    pub span_hz: u32,
+    pub floor_dbfs: f32,
+    pub ceiling_dbfs: f32,
+    pub bins_dbfs: Vec<f32>,
+}
+
+impl SpectrumFrame {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.schema_version != CONTRACT_VERSION {
+            return Err("unsupported spectrum schema".into());
+        }
+        validate_id("session id", &self.session_id)?;
+        if self.generation == 0 || self.observed_at_ms == 0 || self.center_frequency_hz == 0 {
+            return Err("spectrum frame has invalid identity or timing".into());
+        }
+        if self.span_hz == 0 || u64::from(self.span_hz) > self.center_frequency_hz * 2 {
+            return Err("spectrum span is invalid".into());
+        }
+        if !self.floor_dbfs.is_finite()
+            || !self.ceiling_dbfs.is_finite()
+            || self.floor_dbfs < -240.0
+            || self.ceiling_dbfs > 40.0
+            || self.floor_dbfs >= self.ceiling_dbfs
+        {
+            return Err("spectrum power range is invalid".into());
+        }
+        if !(MIN_SPECTRUM_BINS..=MAX_SPECTRUM_BINS).contains(&self.bins_dbfs.len())
+            || self.bins_dbfs.iter().any(|power| !power.is_finite())
+        {
+            return Err("spectrum bins are invalid or unbounded".into());
+        }
+        Ok(())
+    }
+
+    pub fn bin_frequency_hz(&self, index: usize) -> Option<f64> {
+        if index >= self.bins_dbfs.len() {
+            return None;
+        }
+        let start = self.center_frequency_hz as f64 - f64::from(self.span_hz) / 2.0;
+        let width = f64::from(self.span_hz) / self.bins_dbfs.len() as f64;
+        Some(start + (index as f64 + 0.5) * width)
+    }
 }
 
 impl IqStreamAnnouncement {
