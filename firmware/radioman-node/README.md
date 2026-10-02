@@ -12,7 +12,6 @@ advertise the resulting capability but is not a firmware dependency.
 
 - identifies itself from the ESP32-S3 eFuse MAC;
 - emits one parseable `radioman.status` health record per second;
-- uses a 10-second hardware watchdog;
 - advertises receive capabilities while explicitly reporting `tx=disabled`;
 - never configures or transmits through the SX1262.
 
@@ -28,8 +27,8 @@ Install the Espressif Rust tools once, then:
 . "$HOME/export-esp.sh"
 cargo check
 cargo build --release
-espflash save-image --chip esp32s3 --flash-size 8mb --flash-mode qio \
-  --flash-freq 80mhz --merge --skip-padding \
+espflash save-image --chip esp32s3 --flash-size 8mb --flash-mode dio \
+  --flash-freq 40mhz --merge --skip-padding \
   target/xtensa-esp32s3-none-elf/release/radioman-node radioman-node.bin
 ```
 

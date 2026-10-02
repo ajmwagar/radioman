@@ -12,7 +12,6 @@ use embassy_time::{Duration, Timer};
 use esp_backtrace as _;
 use esp_hal::clock::CpuClock;
 use esp_hal::efuse;
-use esp_hal::time::Duration as HalDuration;
 use esp_hal::timer::timg::TimerGroup;
 use radioman_node::{BOARD, CAPABILITIES, FIRMWARE_VERSION, STATUS_PROTOCOL_VERSION};
 
@@ -33,12 +32,6 @@ async fn main(spawner: Spawner) -> ! {
     let peripherals = esp_hal::init(config);
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
-    let mut watchdog = timg0.wdt;
-    watchdog.set_timeout(
-        esp_hal::timer::timg::MwdtStage::Stage0,
-        HalDuration::from_secs(10),
-    );
-    watchdog.enable();
     esp_rtos::start(timg0.timer0, peripherals.FROM_CPU_INTR0);
 
     let mac = efuse::base_mac_address();
@@ -54,7 +47,6 @@ async fn main(spawner: Spawner) -> ! {
     let _ = spawner;
 
     loop {
-        watchdog.feed();
         esp_println::println!(
             "radioman.status v={} kind=health state=ready tx=disabled",
             STATUS_PROTOCOL_VERSION
