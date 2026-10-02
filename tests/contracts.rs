@@ -1,6 +1,6 @@
 use radioman::{
-    Agent, FrequencyRange, IqStreamAnnouncement, RadioDescriptor, RadioKind, RxRequest,
-    SampleFormat, SessionPhase, SpectrumFrame, StopRequest,
+    Agent, ExperimentOutput, ExperimentRequest, FrequencyRange, IqStreamAnnouncement,
+    RadioDescriptor, RadioKind, RxRequest, SampleFormat, SessionPhase, SpectrumFrame, StopRequest,
 };
 use std::collections::BTreeSet;
 
@@ -19,6 +19,26 @@ fn rtl() -> RadioDescriptor {
         receive: true,
         transmit: false,
     }
+}
+
+#[test]
+fn experiments_are_timed_and_outputs_are_narrow() {
+    let mut rx = request("adsb-evening");
+    rx.center_frequency_hz = 1_090_000_000;
+    rx.sample_rate_hz = 2_048_000;
+    rx.duration_ms = Some(60_000);
+    let experiment = ExperimentRequest {
+        owner: "canvas-neo".into(),
+        start_at_ms: 1_000,
+        rx,
+        output: ExperimentOutput::Spectrum {
+            destination: "192.168.10.82:50070".into(),
+        },
+    };
+    experiment.validate_for(&rtl()).unwrap();
+    let mut invalid = experiment;
+    invalid.rx.duration_ms = None;
+    assert!(invalid.validate_for(&rtl()).is_err());
 }
 
 fn request(session_id: &str) -> RxRequest {

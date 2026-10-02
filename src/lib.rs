@@ -179,6 +179,68 @@ pub struct SpectrumFrame {
     pub bins_dbfs: Vec<f32>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ExperimentOutput {
+    Spectrum { destination: String },
+    IqCapture { artifact_name: String },
+    Adsb { destination: String },
+}
+
+/// A schedulable claim on one physical tuner. The service, not the caller,
+/// arbitrates overlap and turns this intent into backend processes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExperimentRequest {
+    pub owner: String,
+    pub start_at_ms: u64,
+    pub rx: RxRequest,
+    pub output: ExperimentOutput,
+}
+
+impl ExperimentRequest {
+    pub fn validate_for(&self, radio: &RadioDescriptor) -> Result<(), String> {
+        validate_id("experiment owner", &self.owner)?;
+        self.rx.validate_for(radio)?;
+        let duration = self
+            .rx
+            .duration_ms
+            .ok_or("scheduled experiments require duration_ms")?;
+        if duration == 0 || duration > 86_400_000 {
+            return Err("experiment duration must be between 1 ms and 24 hours".into());
+        }
+        match &self.output {
+            ExperimentOutput::Spectrum { destination } | ExperimentOutput::Adsb { destination } => {
+                destination
+                    .parse::<std::net::SocketAddr>()
+                    .map_err(|_| "experiment destination must be an IP:port socket")?;
+            }
+            ExperimentOutput::IqCapture { artifact_name } => {
+                validate_id("artifact name", artifact_name)?
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "command", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ServiceCommand {
+    Submit { experiment: ExperimentRequest },
+    Cancel { session_id: String },
+    Status,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServiceStatus {
+    pub schema_version: u32,
+    pub active_session_id: Option<String>,
+    pub queued_session_ids: Vec<String>,
+    pub observed_at_ms: u64,
+    pub error: Option<String>,
+}
+
 impl SpectrumFrame {
     pub fn validate(&self) -> Result<(), String> {
         if self.schema_version != CONTRACT_VERSION {
