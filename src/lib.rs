@@ -177,6 +177,8 @@ pub struct SpectrumFrame {
     pub floor_dbfs: f32,
     pub ceiling_dbfs: f32,
     pub bins_dbfs: Vec<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tuning: Option<ActiveTuning>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -196,6 +198,36 @@ pub struct ExperimentRequest {
     pub start_at_ms: u64,
     pub rx: RxRequest,
     pub output: ExperimentOutput,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ActiveTuning {
+    pub owner: String,
+    pub session_id: String,
+    pub center_frequency_hz: u64,
+    pub sample_rate_hz: u32,
+    pub gain_db: Option<f32>,
+    pub started_at_ms: u64,
+    pub ends_at_ms: u64,
+    pub output: ExperimentOutput,
+}
+
+impl ExperimentRequest {
+    pub fn active_tuning(&self) -> ActiveTuning {
+        ActiveTuning {
+            owner: self.owner.clone(),
+            session_id: self.rx.session_id.clone(),
+            center_frequency_hz: self.rx.center_frequency_hz,
+            sample_rate_hz: self.rx.sample_rate_hz,
+            gain_db: self.rx.gain_db,
+            started_at_ms: self.start_at_ms,
+            ends_at_ms: self
+                .start_at_ms
+                .saturating_add(self.rx.duration_ms.unwrap_or(0)),
+            output: self.output.clone(),
+        }
+    }
 }
 
 impl ExperimentRequest {
@@ -235,7 +267,7 @@ pub enum ServiceCommand {
 #[serde(deny_unknown_fields)]
 pub struct ServiceStatus {
     pub schema_version: u32,
-    pub active_session_id: Option<String>,
+    pub active: Option<ActiveTuning>,
     pub queued_session_ids: Vec<String>,
     pub observed_at_ms: u64,
     pub error: Option<String>,

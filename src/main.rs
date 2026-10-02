@@ -38,7 +38,7 @@ fn service_status(
 ) -> ServiceStatus {
     ServiceStatus {
         schema_version: 1,
-        active_session_id: active.as_ref().map(|v| v.request.rx.session_id.clone()),
+        active: active.as_ref().map(|v| v.request.active_tuning()),
         queued_session_ids: queued.keys().cloned().collect(),
         observed_at_ms: now_ms(),
         error,
@@ -68,6 +68,10 @@ fn spawn_experiment(
         .arg(request.rx.center_frequency_hz.to_string())
         .arg(destination)
         .arg(request.rx.gain_db.unwrap_or(19.7).to_string())
+        .arg(
+            serde_json::to_string(&request.active_tuning())
+                .map_err(|e| format!("encode active tuning: {e}"))?,
+        )
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
@@ -260,6 +264,7 @@ fn receive_spectrum(
     center_frequency_hz: u64,
     destination: SocketAddr,
     gain_db: f32,
+    tuning: Option<radioman::ActiveTuning>,
 ) -> Result<(), String> {
     const SAMPLE_RATE: u32 = 2_048_000;
     if !config.radio.frequency.contains(center_frequency_hz) {
@@ -310,7 +315,10 @@ fn receive_spectrum(
         sequence = sequence.saturating_add(1);
         let frame = SpectrumFrame {
             schema_version: 1,
-            session_id: "radioman-pi/adsb".into(),
+            session_id: tuning.as_ref().map_or_else(
+                || "manual-spectrum".into(),
+                |value| value.session_id.clone(),
+            ),
             generation: 1,
             sequence,
             observed_at_ms: SystemTime::now()
@@ -322,6 +330,7 @@ fn receive_spectrum(
             floor_dbfs: -100.0,
             ceiling_dbfs: -10.0,
             bins_dbfs: spectrum_bins(&iq, &mut planner)?,
+            tuning: tuning.clone(),
         };
         frame.validate()?;
         let encoded =
@@ -473,6 +482,7 @@ fn run() -> Result<(), String> {
         }
         [_, command, path, frequency, destination]
         | [_, command, path, frequency, destination, _]
+        | [_, command, path, frequency, destination, _, _]
             if command == "spectrum" =>
         {
             let config = read_config(path)?;
@@ -488,7 +498,12 @@ fn run() -> Result<(), String> {
                 .transpose()
                 .map_err(|error| format!("invalid gain: {error}"))?
                 .unwrap_or(19.7);
-            receive_spectrum(&config, frequency, destination, gain)
+            let tuning = args
+                .get(6)
+                .map(|value| serde_json::from_str(value))
+                .transpose()
+                .map_err(|error| format!("invalid active tuning: {error}"))?;
+            receive_spectrum(&config, frequency, destination, gain, tuning)
         }
         _ => Err(format!(
             "usage:\n  {} validate-config CONFIG.toml\n  {} serve CONFIG.toml CONTROL_SOCKET\n  {} control CONTROL_SOCKET JSON\n  {} fm CONFIG.toml CENTER_HZ PCM_DEST [GAIN_DB]\n  {} spectrum CONFIG.toml CENTER_HZ UDP_DEST [GAIN_DB]",

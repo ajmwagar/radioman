@@ -36,6 +36,11 @@ fn experiments_are_timed_and_outputs_are_narrow() {
         },
     };
     experiment.validate_for(&rtl()).unwrap();
+    let tuning = experiment.active_tuning();
+    assert_eq!(tuning.owner, "canvas-neo");
+    assert_eq!(tuning.session_id, "adsb-evening");
+    assert_eq!(tuning.center_frequency_hz, 1_090_000_000);
+    assert_eq!(tuning.ends_at_ms, 61_000);
     let mut invalid = experiment;
     invalid.rx.duration_ms = None;
     assert!(invalid.validate_for(&rtl()).is_err());
@@ -133,6 +138,7 @@ fn spectrum_is_bounded_and_frequency_axis_is_derived() {
         floor_dbfs: -100.0,
         ceiling_dbfs: -10.0,
         bins_dbfs: vec![-80.0; 1_000],
+        tuning: None,
     };
     frame.validate().unwrap();
     assert_eq!(frame.bin_frequency_hz(0), Some(1_089_001_000.0));
