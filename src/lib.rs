@@ -11,6 +11,7 @@ pub const CONTRACT_VERSION: u32 = 1;
 pub const CONFIG_VERSION: u32 = 2;
 pub const MAX_ID_BYTES: usize = 96;
 pub const SPECTRUM_CONTRACT: &str = "radioman.spectrum.v1";
+pub const SPECTRUM_CENSUS_CONTRACT: &str = "radioman.spectrum-census.v1";
 pub const MIN_SPECTRUM_BINS: usize = 64;
 pub const MAX_SPECTRUM_BINS: usize = 4_096;
 
@@ -256,6 +257,98 @@ pub struct SpectrumFrame {
     pub bins_dbfs: Vec<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tuning: Option<ActiveTuning>,
+}
+
+/// Low-rate, bounded projection of many FFT frames. This is the durable
+/// observatory contract; raw IQ and renderer-specific history remain outside it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SpectrumCensusFrame {
+    pub schema_version: u32,
+    pub session_id: String,
+    pub generation: u64,
+    pub sequence: u64,
+    pub started_at_ms: u64,
+    pub observed_at_ms: u64,
+    pub center_frequency_hz: u64,
+    pub span_hz: u32,
+    pub frame_count: u64,
+    pub threshold_dbfs: f32,
+    pub mean_dbfs: Vec<f32>,
+    pub peak_dbfs: Vec<f32>,
+    pub occupancy: Vec<f32>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SpectrumCensus {
+    started_at_ms: u64,
+    threshold_dbfs: f32,
+    frames: u64,
+    sums: Vec<f64>,
+    peaks: Vec<f32>,
+    occupied: Vec<u64>,
+}
+
+impl SpectrumCensus {
+    pub fn new(started_at_ms: u64, buckets: usize, threshold_dbfs: f32) -> Result<Self, String> {
+        if started_at_ms == 0 || !(4..=256).contains(&buckets) || !threshold_dbfs.is_finite() {
+            return Err("invalid spectrum census configuration".into());
+        }
+        Ok(Self {
+            started_at_ms,
+            threshold_dbfs,
+            frames: 0,
+            sums: vec![0.0; buckets],
+            peaks: vec![f32::NEG_INFINITY; buckets],
+            occupied: vec![0; buckets],
+        })
+    }
+
+    pub fn observe(&mut self, frame: &SpectrumFrame) -> Result<(), String> {
+        frame.validate()?;
+        self.frames += 1;
+        for bucket in 0..self.sums.len() {
+            let start = bucket * frame.bins_dbfs.len() / self.sums.len();
+            let end = (bucket + 1) * frame.bins_dbfs.len() / self.sums.len();
+            let value = frame.bins_dbfs[start..end]
+                .iter()
+                .copied()
+                .fold(f32::NEG_INFINITY, f32::max);
+            self.sums[bucket] += f64::from(value);
+            self.peaks[bucket] = self.peaks[bucket].max(value);
+            self.occupied[bucket] += u64::from(value >= self.threshold_dbfs);
+        }
+        Ok(())
+    }
+
+    pub fn snapshot(&self, frame: &SpectrumFrame) -> Result<SpectrumCensusFrame, String> {
+        if self.frames == 0 {
+            return Err("spectrum census has no observations".into());
+        }
+        Ok(SpectrumCensusFrame {
+            schema_version: CONTRACT_VERSION,
+            session_id: frame.session_id.clone(),
+            generation: frame.generation,
+            sequence: frame.sequence,
+            started_at_ms: self.started_at_ms,
+            observed_at_ms: frame.observed_at_ms,
+            center_frequency_hz: frame.center_frequency_hz,
+            span_hz: frame.span_hz,
+            frame_count: self.frames,
+            threshold_dbfs: self.threshold_dbfs,
+            mean_dbfs: self
+                .sums
+                .iter()
+                .map(|sum| (*sum / self.frames as f64) as f32)
+                .collect(),
+            peak_dbfs: self.peaks.clone(),
+            occupancy: self
+                .occupied
+                .iter()
+                .map(|count| *count as f32 / self.frames as f32)
+                .collect(),
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

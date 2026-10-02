@@ -1,7 +1,7 @@
 use radioman::{
     Agent, DeviceIndex, ExperimentOutput, ExperimentRequest, FrequencyRange, IqStreamAnnouncement,
     PacketRadioCapability, PacketRadioDescriptor, RadioDescriptor, RadioKind, RxRequest,
-    SampleFormat, SessionPhase, SpectrumFrame, StopRequest,
+    SampleFormat, SessionPhase, SpectrumCensus, SpectrumFrame, StopRequest,
 };
 use std::collections::BTreeSet;
 
@@ -186,4 +186,32 @@ fn spectrum_is_bounded_and_frequency_axis_is_derived() {
     let mut unbounded = frame.clone();
     unbounded.bins_dbfs = vec![0.0; 4_097];
     assert!(unbounded.validate().is_err());
+}
+
+#[test]
+fn spectrum_census_retains_mean_peak_and_occupancy() {
+    let mut frame = SpectrumFrame {
+        schema_version: 1,
+        session_id: "survey".into(),
+        generation: 1,
+        sequence: 1,
+        observed_at_ms: 1_000,
+        center_frequency_hz: 100_000_000,
+        span_hz: 2_000_000,
+        floor_dbfs: -100.0,
+        ceiling_dbfs: -10.0,
+        bins_dbfs: vec![-90.0; 64],
+        tuning: None,
+    };
+    let mut census = SpectrumCensus::new(1_000, 4, -70.0).unwrap();
+    census.observe(&frame).unwrap();
+    frame.sequence = 2;
+    frame.observed_at_ms = 2_000;
+    frame.bins_dbfs[0..16].fill(-50.0);
+    census.observe(&frame).unwrap();
+    let snapshot = census.snapshot(&frame).unwrap();
+    assert_eq!(snapshot.frame_count, 2);
+    assert_eq!(snapshot.mean_dbfs, vec![-70.0, -90.0, -90.0, -90.0]);
+    assert_eq!(snapshot.peak_dbfs, vec![-50.0, -90.0, -90.0, -90.0]);
+    assert_eq!(snapshot.occupancy, vec![0.5, 0.0, 0.0, 0.0]);
 }
