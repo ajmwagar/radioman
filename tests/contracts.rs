@@ -1,9 +1,10 @@
 use radioman::{
     Agent, DeviceIndex, ExperimentOutput, ExperimentRequest, FrequencyRange, IqStreamAnnouncement,
     PacketRadioCapability, PacketRadioDescriptor, RadioDescriptor, RadioKind, RxRequest,
-    SampleFormat, ServiceCommand, SessionPhase, SpectrumCensus, SpectrumFrame, StopRequest,
+    SampleFormat, ServiceCommand, ServiceStatus, SessionPhase, SpectrumCensus, SpectrumFrame,
+    StopRequest,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 fn rtl() -> RadioDescriptor {
     RadioDescriptor {
@@ -40,6 +41,7 @@ fn experiments_are_timed_and_outputs_are_narrow() {
     let tuning = experiment.active_tuning();
     assert_eq!(tuning.owner, "canvas-neo");
     assert_eq!(tuning.session_id, "adsb-evening");
+    assert_eq!(tuning.radio_id, "rtl-sdr/00000001");
     assert_eq!(tuning.center_frequency_hz, 1_090_000_000);
     assert_eq!(tuning.ends_at_ms, 61_000);
     let mut invalid = experiment;
@@ -233,4 +235,124 @@ fn retune_command_is_narrow_and_typed() {
             gain_db: Some(gain)
         } if session_id == "ism-915-live" && (gain - 17.4).abs() < f32::EPSILON
     ));
+}
+
+#[test]
+fn dcp_catalog_changes_actions_with_tuner_ownership() {
+    let devices = DeviceIndex {
+        schema_version: 1,
+        node_id: "radioman-pi".into(),
+        radios: vec![rtl()],
+        packet_radios: vec![],
+    };
+    let idle = ServiceStatus {
+        schema_version: 1,
+        active: None,
+        queued_session_ids: vec![],
+        observed_at_ms: 1_000,
+        error: None,
+    };
+    let idle_projection = radioman::dcp::Projection {
+        devices: &devices,
+        status: &idle,
+        spectrum_destination: "192.168.2.3:50070",
+    };
+    let idle_catalog = idle_projection.catalog().unwrap();
+    assert_eq!(idle_catalog.actions.len(), 1);
+    assert_eq!(idle_catalog.actions[0].id, "radioman.spectrum.start");
+
+    let running = ServiceStatus {
+        schema_version: 1,
+        active: Some(
+            ExperimentRequest {
+                owner: "dcp".into(),
+                start_at_ms: 1_000,
+                rx: RxRequest {
+                    duration_ms: Some(60_000),
+                    ..request("fm-live")
+                },
+                output: ExperimentOutput::Spectrum {
+                    destination: "192.168.2.3:50070".into(),
+                },
+            }
+            .active_tuning(),
+        ),
+        queued_session_ids: vec![],
+        observed_at_ms: 2_000,
+        error: None,
+    };
+    let running_projection = radioman::dcp::Projection {
+        devices: &devices,
+        status: &running,
+        spectrum_destination: "192.168.2.3:50070",
+    };
+    let running_catalog = running_projection.catalog().unwrap();
+    assert_eq!(
+        running_catalog
+            .actions
+            .iter()
+            .map(|action| action.id.as_str())
+            .collect::<Vec<_>>(),
+        ["radioman.tuner.retune", "radioman.session.stop"]
+    );
+    assert_ne!(
+        idle_catalog.catalog_revision,
+        running_catalog.catalog_revision
+    );
+    assert_ne!(idle_catalog.state_revision, running_catalog.state_revision);
+}
+
+#[test]
+fn dcp_execution_rejects_stale_state_before_emitting_a_command() {
+    let devices = DeviceIndex {
+        schema_version: 1,
+        node_id: "radioman-pi".into(),
+        radios: vec![rtl()],
+        packet_radios: vec![],
+    };
+    let status = ServiceStatus {
+        schema_version: 1,
+        active: None,
+        queued_session_ids: vec![],
+        observed_at_ms: 1_000,
+        error: None,
+    };
+    let projection = radioman::dcp::Projection {
+        devices: &devices,
+        status: &status,
+        spectrum_destination: "192.168.2.3:50070",
+    };
+    let catalog = projection.catalog().unwrap();
+    let request = dcp::ExecuteRequest {
+        dcp_version: dcp::VERSION.into(),
+        request_id: "request-1".into(),
+        decision_id: "decision-1".into(),
+        action_id: "radioman.spectrum.start".into(),
+        arguments: BTreeMap::from([
+            ("session_id".into(), serde_json::json!("fm-live")),
+            ("radio_id".into(), serde_json::json!("rtl-sdr/00000001")),
+            ("center_frequency_hz".into(), serde_json::json!(100_000_000)),
+            ("duration_ms".into(), serde_json::json!(60_000)),
+        ]),
+        phase: dcp::Phase::Commit,
+        expected_catalog_revision: catalog.catalog_revision.clone(),
+        expected_state_revision: "state-old".into(),
+        prepared_receipt_id: None,
+        confirmed: false,
+        evidence: dcp::Evidence {
+            utterance_id: "utterance-1".into(),
+            transcript_revision: 3,
+            final_: true,
+        },
+    };
+    let stale = projection.command(&request).unwrap_err();
+    assert_eq!(stale.code, dcp::ErrorCode::StaleState);
+
+    let command = projection
+        .command(&dcp::ExecuteRequest {
+            expected_state_revision: catalog.state_revision,
+            ..request
+        })
+        .unwrap();
+    assert!(matches!(command, ServiceCommand::Submit { .. }));
 }

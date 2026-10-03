@@ -41,6 +41,28 @@ one FFT power row; consumers derive its frequency axis, peaks, persistence, and
 waterfall history. Raw IQ uses a direct `udp://` or `quic://` endpoint announced
 by Radioman.
 
+## DCP provider
+
+Radioman derives a DCP 0.1 catalog from its validated `DeviceIndex` and live
+`ServiceStatus`. When the tuner is idle it advertises
+`radioman.spectrum.start`; while owned it advertises
+`radioman.tuner.retune` and `radioman.session.stop`. It never advertises a
+transmit decision. Every execute request is checked against the exact catalog
+and state revisions before a typed `ServiceCommand` reaches the owner process.
+
+The HTTP surface is loopback-only and bearer authenticated:
+
+```sh
+radioman dcp-serve CONFIG.toml /run/radioman/control.sock \
+  127.0.0.1:7894 192.168.10.82:50070 /etc/radioman/dcp.token
+```
+
+It serves `/.well-known/dcp`, `/v1/decisions`, and
+`/v1/decisions/execute`. The generic `unibus-dcp` edge leases this catalog onto
+UniBus using `unibus/config/dcp-radioman.json`. Spectrum and IQ payloads remain
+on their announced UDP/QUIC paths; DCP and UniBus carry only decisions and
+descriptions.
+
 ## Development
 
 ```sh

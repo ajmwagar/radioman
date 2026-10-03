@@ -17,6 +17,12 @@ use std::{
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+use stream_descriptors::{
+    EndpointAnnouncementV1, Freshness, MediaCharacteristics, SCHEMA_VERSION, StreamDescriptorV1,
+    TransportEndpoint,
+};
+use subtle::ConstantTimeEq;
+use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
 struct ActiveExperiment {
     request: ExperimentRequest,
@@ -253,20 +259,228 @@ fn serve(config_path: &str, socket_path: &str) -> Result<(), String> {
 }
 
 fn control(socket_path: &str, json: &str) -> Result<(), String> {
+    let status = control_status(socket_path, json.as_bytes())?;
+    println!(
+        "{}",
+        serde_json::to_string(&status).map_err(|e| format!("encode status: {e}"))?
+    );
+    Ok(())
+}
+
+fn control_status(socket_path: &str, command: &[u8]) -> Result<ServiceStatus, String> {
     let mut stream =
         UnixStream::connect(socket_path).map_err(|e| format!("connect tuner service: {e}"))?;
     stream
-        .write_all(json.as_bytes())
+        .write_all(command)
         .map_err(|e| format!("send command: {e}"))?;
     stream
         .shutdown(std::net::Shutdown::Write)
         .map_err(|e| format!("finish command: {e}"))?;
-    let mut response = String::new();
+    let mut response = Vec::new();
     stream
-        .read_to_string(&mut response)
+        .read_to_end(&mut response)
         .map_err(|e| format!("read response: {e}"))?;
-    println!("{response}");
+    serde_json::from_slice(&response).map_err(|e| format!("decode service status: {e}"))
+}
+
+fn dcp_serve(
+    config: &Config,
+    socket_path: &str,
+    listen: &str,
+    spectrum_destination: &str,
+    token_file: &str,
+) -> Result<(), String> {
+    let address = listen
+        .parse::<SocketAddr>()
+        .map_err(|e| format!("invalid DCP listen address: {e}"))?;
+    if !address.ip().is_loopback() {
+        return Err("Radioman DCP HTTP must bind loopback; publish remotely through Unibus".into());
+    }
+    spectrum_destination
+        .parse::<SocketAddr>()
+        .map_err(|e| format!("invalid DCP spectrum destination: {e}"))?;
+    let token =
+        fs::read_to_string(token_file).map_err(|e| format!("read DCP bearer token: {e}"))?;
+    let token = token.trim().as_bytes().to_vec();
+    if token.len() < 32 {
+        return Err("DCP bearer token must contain at least 32 bytes".into());
+    }
+    let server = Server::http(address).map_err(|e| format!("bind Radioman DCP HTTP: {e}"))?;
+    let devices = config.device_index();
+    let mut receipts = BTreeMap::<String, (Vec<u8>, dcp::Receipt)>::new();
+    eprintln!("radioman: DCP provider listening on http://{address}");
+    for mut request in server.incoming_requests() {
+        let supplied = request
+            .headers()
+            .iter()
+            .find(|header| header.field.equiv("Authorization"))
+            .and_then(|header| header.value.as_str().strip_prefix("Bearer "))
+            .map(str::as_bytes)
+            .unwrap_or_default();
+        if supplied.len() != token.len() || supplied.ct_eq(&token).unwrap_u8() != 1 {
+            respond_json(
+                request,
+                401,
+                &serde_json::json!({"code":"unauthorized","message":"valid bearer authorization is required","retryable":false}),
+            )?;
+            continue;
+        }
+        let version = request
+            .headers()
+            .iter()
+            .find(|header| header.field.equiv("DCP-Version"))
+            .map(|header| header.value.as_str());
+        if version != Some(dcp::VERSION) {
+            respond_json(
+                request,
+                406,
+                &serde_json::json!({"code":"unsupported_version","message":"DCP-Version must be exactly 0.1","retryable":false}),
+            )?;
+            continue;
+        }
+        let path = request.url().split('?').next().unwrap_or(request.url());
+        match (request.method(), path) {
+            (&Method::Get, "/.well-known/dcp") => {
+                let status = current_status(socket_path)?;
+                let projection = radioman::dcp::Projection {
+                    devices: &devices,
+                    status: &status,
+                    spectrum_destination,
+                };
+                respond_json(request, 200, &projection.discovery())?;
+            }
+            (&Method::Get, "/v1/decisions") => {
+                let status = current_status(socket_path)?;
+                let projection = radioman::dcp::Projection {
+                    devices: &devices,
+                    status: &status,
+                    spectrum_destination,
+                };
+                match projection.catalog() {
+                    Ok(catalog) => respond_json(request, 200, &catalog)?,
+                    Err(error) => respond_json(
+                        request,
+                        503,
+                        &serde_json::json!({"code":"internal_error","message":error,"retryable":true}),
+                    )?,
+                }
+            }
+            (&Method::Post, "/v1/decisions/execute") => {
+                let mut body = Vec::new();
+                request
+                    .as_reader()
+                    .take(1024 * 1024)
+                    .read_to_end(&mut body)
+                    .map_err(|e| format!("read DCP execute request: {e}"))?;
+                let execute: dcp::ExecuteRequest = match serde_json::from_slice(&body) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        respond_json(
+                            request,
+                            400,
+                            &serde_json::json!({"code":"invalid_request","message":error.to_string(),"retryable":false}),
+                        )?;
+                        continue;
+                    }
+                };
+                let status = current_status(socket_path)?;
+                let projection = radioman::dcp::Projection {
+                    devices: &devices,
+                    status: &status,
+                    spectrum_destination,
+                };
+                if let Some((fingerprint, receipt)) = receipts.get(&execute.request_id) {
+                    if fingerprint == &body {
+                        let code = if matches!(receipt.outcome, dcp::Outcome::Rejected) {
+                            409
+                        } else {
+                            200
+                        };
+                        respond_json(request, code, receipt)?;
+                    } else {
+                        let receipt = radioman::dcp::rejected(
+                            projection,
+                            &execute,
+                            now_ms(),
+                            dcp::Problem {
+                                code: dcp::ErrorCode::Conflict,
+                                message: "request_id was reused with different content".into(),
+                                retryable: false,
+                                details: None,
+                            },
+                        );
+                        respond_json(request, 409, &receipt)?;
+                    }
+                    continue;
+                }
+                if receipts.len() >= 1024 {
+                    let receipt = radioman::dcp::rejected(
+                        projection,
+                        &execute,
+                        now_ms(),
+                        dcp::Problem {
+                            code: dcp::ErrorCode::InternalError,
+                            message: "DCP receipt ledger is full".into(),
+                            retryable: true,
+                            details: None,
+                        },
+                    );
+                    respond_json(request, 503, &receipt)?;
+                    continue;
+                }
+                let receipt = radioman::dcp::execute(projection, &execute, now_ms(), |command| {
+                    let body = serde_json::to_vec(&command)
+                        .map_err(|e| format!("encode service command: {e}"))?;
+                    control_status(socket_path, &body)
+                });
+                let code = if matches!(receipt.outcome, dcp::Outcome::Rejected) {
+                    409
+                } else {
+                    200
+                };
+                receipts.insert(execute.request_id.clone(), (body, receipt.clone()));
+                respond_json(request, code, &receipt)?;
+            }
+            _ => respond_json(
+                request,
+                404,
+                &serde_json::json!({"code":"action_not_found","message":"DCP endpoint not found","retryable":false}),
+            )?,
+        }
+    }
     Ok(())
+}
+
+fn current_status(socket_path: &str) -> Result<ServiceStatus, String> {
+    control_status(
+        socket_path,
+        &serde_json::to_vec(&ServiceCommand::Status)
+            .map_err(|e| format!("encode status command: {e}"))?,
+    )
+}
+
+fn respond_json<T: serde::Serialize>(
+    request: Request,
+    status: u16,
+    value: &T,
+) -> Result<(), String> {
+    let body = serde_json::to_vec(value).map_err(|e| format!("encode DCP response: {e}"))?;
+    let response = Response::from_data(body)
+        .with_status_code(StatusCode(status))
+        .with_header(
+            Header::from_bytes("content-type", "application/json")
+                .map_err(|_| "invalid content-type header")?,
+        )
+        .with_header(
+            Header::from_bytes("dcp-version", dcp::VERSION)
+                .map_err(|_| "invalid DCP version header")?,
+        )
+        .with_header(
+            Header::from_bytes("cache-control", "no-store").map_err(|_| "invalid cache header")?,
+        );
+    request
+        .respond(response)
+        .map_err(|e| format!("send DCP response: {e}"))
 }
 
 #[derive(Deserialize)]
@@ -390,6 +604,7 @@ fn receive_spectrum(
     let mut iq = [0_u8; 2048];
     let mut sequence = 0_u64;
     let mut next_frame = Instant::now();
+    let mut next_descriptor = Instant::now();
     eprintln!(
         "radioman: spectrum center={center_frequency_hz}Hz span={SAMPLE_RATE}Hz gain={gain_db:.1}dB destination={destination}"
     );
@@ -399,6 +614,57 @@ fn receive_spectrum(
             .map_err(|error| format!("read rtl_sdr IQ: {error}"))?;
         if Instant::now() < next_frame {
             continue;
+        }
+        if Instant::now() >= next_descriptor {
+            let observed_at_unix_ms = now_ms();
+            let descriptor = StreamDescriptorV1 {
+                schema_version: SCHEMA_VERSION,
+                stream_id: "radio/spectrum/live".into(),
+                semantic_type: "rf.spectrum".into(),
+                source_resource: "radio/rtl-sdr".into(),
+                content: BTreeMap::from([
+                    ("role".into(), serde_json::json!("radio-analysis")),
+                    (
+                        "description".into(),
+                        serde_json::json!(
+                            "FFT power observations from the active software-defined-radio receiver, suitable for spectrum and waterfall views."
+                        ),
+                    ),
+                ]),
+                media: MediaCharacteristics {
+                    sample_format: Some("power-db".into()),
+                    sample_rate: Some(SAMPLE_RATE as u32),
+                    ..Default::default()
+                },
+                freshness: Freshness::Live,
+                provenance: "radioman".into(),
+            };
+            descriptor.validate()?;
+            socket
+                .send(
+                    &serde_json::to_vec(&descriptor)
+                        .map_err(|error| format!("encode stream descriptor: {error}"))?,
+                )
+                .map_err(|error| format!("send stream descriptor: {error}"))?;
+            let endpoints = EndpointAnnouncementV1 {
+                schema_version: SCHEMA_VERSION,
+                stream_id: descriptor.stream_id.clone(),
+                endpoints: vec![TransportEndpoint {
+                    transport: "udp".into(),
+                    uri_reference: "radioman/spectrum".into(),
+                }],
+                observed_at_unix_ms,
+                valid_until_unix_ms: observed_at_unix_ms + 90_000,
+                provenance: "radioman".into(),
+            };
+            endpoints.validate(observed_at_unix_ms)?;
+            socket
+                .send(
+                    &serde_json::to_vec(&endpoints)
+                        .map_err(|error| format!("encode endpoint announcement: {error}"))?,
+                )
+                .map_err(|error| format!("send endpoint announcement: {error}"))?;
+            next_descriptor = Instant::now() + Duration::from_secs(30);
         }
         next_frame = Instant::now() + Duration::from_millis(50);
         sequence = sequence.saturating_add(1);
@@ -565,6 +831,18 @@ fn run() -> Result<(), String> {
         }
         [_, command, path, socket] if command == "serve" => serve(path, socket),
         [_, command, socket, json] if command == "control" => control(socket, json),
+        [
+            _,
+            command,
+            path,
+            socket,
+            listen,
+            spectrum_destination,
+            token_file,
+        ] if command == "dcp-serve" => {
+            let config = read_config(path)?;
+            dcp_serve(&config, socket, listen, spectrum_destination, token_file)
+        }
         [_, command, path, frequency, destination]
         | [_, command, path, frequency, destination, _]
             if command == "fm" =>
@@ -612,8 +890,8 @@ fn run() -> Result<(), String> {
             receive_spectrum(&config, radio_id, frequency, destination, gain, tuning)
         }
         _ => Err(format!(
-            "usage:\n  {} validate-config CONFIG.toml\n  {} device-index CONFIG.toml\n  {} serve CONFIG.toml CONTROL_SOCKET\n  {} control CONTROL_SOCKET JSON\n  {} fm CONFIG.toml CENTER_HZ PCM_DEST [GAIN_DB]\n  {} spectrum CONFIG.toml CENTER_HZ UDP_DEST [GAIN_DB] [TUNING_JSON] [RADIO_ID]",
-            args[0], args[0], args[0], args[0], args[0], args[0]
+            "usage:\n  {} validate-config CONFIG.toml\n  {} device-index CONFIG.toml\n  {} serve CONFIG.toml CONTROL_SOCKET\n  {} control CONTROL_SOCKET JSON\n  {} dcp-serve CONFIG.toml CONTROL_SOCKET LISTEN SPECTRUM_DEST TOKEN_FILE\n  {} fm CONFIG.toml CENTER_HZ PCM_DEST [GAIN_DB]\n  {} spectrum CONFIG.toml CENTER_HZ UDP_DEST [GAIN_DB] [TUNING_JSON] [RADIO_ID]",
+            args[0], args[0], args[0], args[0], args[0], args[0], args[0]
         )),
     }
 }

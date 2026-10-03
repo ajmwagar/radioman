@@ -10,6 +10,12 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
 rustfft = "6"
+stream-descriptors = { path = "../unibus/crates/stream-descriptors" }
+dcp = { git = "https://github.com/FuturePresentLabs/dcp.git", rev = "d3a1335" }
+sha2 = "0.10"
+time = { version = "0.3", features = ["formatting"] }
+tiny_http = "0.12"
+subtle = "2"
 
 [dev-dependencies]
 tempfile = "3"

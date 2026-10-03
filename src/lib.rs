@@ -7,6 +7,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
+pub mod dcp;
+
 pub const CONTRACT_VERSION: u32 = 1;
 pub const CONFIG_VERSION: u32 = 2;
 pub const MAX_ID_BYTES: usize = 96;
@@ -375,6 +377,7 @@ pub struct ExperimentRequest {
 pub struct ActiveTuning {
     pub owner: String,
     pub session_id: String,
+    pub radio_id: String,
     pub center_frequency_hz: u64,
     pub sample_rate_hz: u32,
     pub gain_db: Option<f32>,
@@ -388,6 +391,7 @@ impl ExperimentRequest {
         ActiveTuning {
             owner: self.owner.clone(),
             session_id: self.rx.session_id.clone(),
+            radio_id: self.rx.radio_id.clone(),
             center_frequency_hz: self.rx.center_frequency_hz,
             sample_rate_hz: self.rx.sample_rate_hz,
             gain_db: self.rx.gain_db,
