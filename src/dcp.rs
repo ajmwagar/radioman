@@ -336,7 +336,7 @@ impl Projection<'_> {
                 }
             }),
             available,
-            Some("no_receive_tuner"),
+            (!available).then_some("no_receive_tuner"),
         ))
     }
 
