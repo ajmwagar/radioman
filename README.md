@@ -52,3 +52,12 @@ cargo run -- validate-config ../radioman-pi/config/radioman.toml
 The first hardware milestone is receive-only RTL-SDR. HackRF receive follows;
 transmit is a separate safety-reviewed capability with frequency/power limits,
 short leases, audit receipts, and a host-local enable interlock.
+
+## License
+
+Licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
+- MIT License ([LICENSE-MIT](LICENSE-MIT))
+
+at your option.
