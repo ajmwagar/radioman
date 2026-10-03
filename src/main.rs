@@ -146,6 +146,43 @@ fn serve(config_path: &str, socket_path: &str) -> Result<(), String> {
                         }
                         service_status(&active, &queued, None)
                     }
+                    Ok(ServiceCommand::Retune {
+                        session_id,
+                        center_frequency_hz,
+                        gain_db,
+                    }) => {
+                        let result = (|| {
+                            let running =
+                                active.as_ref().ok_or("no active experiment to retune")?;
+                            if running.request.rx.session_id != session_id {
+                                return Err(format!(
+                                    "session does not own the active tuner: {session_id}"
+                                ));
+                            }
+                            let now = now_ms();
+                            let remaining = running.ends_at_ms.saturating_sub(now);
+                            if remaining == 0 {
+                                return Err("active experiment has already expired".into());
+                            }
+                            let mut replacement = running.request.clone();
+                            replacement.start_at_ms = now;
+                            replacement.rx.center_frequency_hz = center_frequency_hz;
+                            replacement.rx.duration_ms = Some(remaining);
+                            if gain_db.is_some() {
+                                replacement.rx.gain_db = gain_db;
+                            }
+                            let radio = config.radio(&replacement.rx.radio_id)?;
+                            replacement.validate_for(radio)?;
+
+                            // Validation happens before disrupting the current
+                            // receiver. rtl_sdr cannot retune in place, so this
+                            // backend performs one explicit process handoff.
+                            terminate(active.as_mut().expect("active checked above"));
+                            active = Some(spawn_experiment(config_path, &replacement)?);
+                            Ok(())
+                        })();
+                        service_status(&active, &queued, result.err())
+                    }
                     Ok(ServiceCommand::Submit { mut experiment }) => {
                         if experiment.start_at_ms == 0 {
                             experiment.start_at_ms = now_ms();

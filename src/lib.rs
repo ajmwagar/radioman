@@ -428,8 +428,20 @@ impl ExperimentRequest {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ServiceCommand {
-    Submit { experiment: ExperimentRequest },
-    Cancel { session_id: String },
+    Submit {
+        experiment: ExperimentRequest,
+    },
+    Cancel {
+        session_id: String,
+    },
+    /// Replace the tuning of the active session while preserving its owner,
+    /// output route, radio claim, and original end time.
+    Retune {
+        session_id: String,
+        center_frequency_hz: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        gain_db: Option<f32>,
+    },
     Status,
 }
 

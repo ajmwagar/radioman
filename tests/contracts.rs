@@ -1,7 +1,7 @@
 use radioman::{
     Agent, DeviceIndex, ExperimentOutput, ExperimentRequest, FrequencyRange, IqStreamAnnouncement,
     PacketRadioCapability, PacketRadioDescriptor, RadioDescriptor, RadioKind, RxRequest,
-    SampleFormat, SessionPhase, SpectrumCensus, SpectrumFrame, StopRequest,
+    SampleFormat, ServiceCommand, SessionPhase, SpectrumCensus, SpectrumFrame, StopRequest,
 };
 use std::collections::BTreeSet;
 
@@ -214,4 +214,23 @@ fn spectrum_census_retains_mean_peak_and_occupancy() {
     assert_eq!(snapshot.mean_dbfs, vec![-70.0, -90.0, -90.0, -90.0]);
     assert_eq!(snapshot.peak_dbfs, vec![-50.0, -90.0, -90.0, -90.0]);
     assert_eq!(snapshot.occupancy, vec![0.5, 0.0, 0.0, 0.0]);
+}
+
+#[test]
+fn retune_command_is_narrow_and_typed() {
+    let command: ServiceCommand = serde_json::from_value(serde_json::json!({
+        "command": "retune",
+        "session_id": "ism-915-live",
+        "center_frequency_hz": 433_920_000,
+        "gain_db": 17.4
+    }))
+    .unwrap();
+    assert!(matches!(
+        command,
+        ServiceCommand::Retune {
+            session_id,
+            center_frequency_hz: 433_920_000,
+            gain_db: Some(gain)
+        } if session_id == "ism-915-live" && (gain - 17.4).abs() < f32::EPSILON
+    ));
 }
