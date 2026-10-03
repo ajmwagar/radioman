@@ -1,0 +1,20 @@
+[Unit]
+Description=Radioman DCP provider
+After=network-online.target radioman.service
+Requires=radioman.service
+
+[Service]
+Type=simple
+User=radioman
+Group=radioman
+ExecStart=/usr/local/bin/radioman dcp-serve /etc/radioman/radioman.toml /run/radioman/control.sock 127.0.0.1:7894 192.168.10.74:50070 /etc/radioman/dcp.token
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target
