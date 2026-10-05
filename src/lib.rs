@@ -9,6 +9,7 @@ use std::collections::BTreeSet;
 
 pub mod dcp;
 pub mod decoder;
+pub mod location;
 
 pub const CONTRACT_VERSION: u32 = 1;
 pub const CONFIG_VERSION: u32 = 2;

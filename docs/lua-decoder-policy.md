@@ -52,3 +52,36 @@ Panopticon consumes retained state; Elmers consumes reconciled business effects,
 not one workflow per IQ sample or packet.
 
 Verify locally: `cargo check --features lua`, then `cargo test --features lua`.
+
+## Receiver site location
+
+`location::SiteRegistry` stores one location per physical site and explicitly
+assigns receiver source IDs to site IDs. A captured GPS measurement can establish
+a fixed site's coordinates without GPS attached to every receiver. Sharing a
+LAN does not assign a physical site.
+
+After Lua routing, the host calls `registry.locate(original_packet)`. The returned
+`LocatedPacket` keeps the packet unchanged and adds separate `reception` metadata:
+site ID, latitude/longitude, optional altitude/accuracy, GPS/surveyed evidence,
+measurement time and optional validity deadline. Coordinates are WGS84 decimal
+degrees; altitude is meters and its datum must be normalized by the provider.
+Unknown altitude and accuracy remain absent. The deadline is exclusive; no
+deadline denotes a fixed site, not an indefinitely fresh mobile GPS fix. Moving
+equipment requires updating the assignment; mobile fixes require deadlines.
+Invalid registry references, coordinates, future/expired evidence, and total
+serialized size above 64 KiB fail loudly.
+
+This is a tested library API, not a GPS collector, daemon config loader, deployed
+registry or live consumer integration. It never borrows GPS from another site.
+
+Panopticon should use aircraft coordinates from ADS-B payloads for aircraft
+tracks and retain reception location separately as provenance. RF summaries and
+receiver-health records use site coordinates, explicitly labeled `receiver_site`.
+Never replace an unknown aircraft position with receiver position. Digges'
+required altitude still needs a missing-altitude representation before live
+ingestion; do not invent measured height. Location evidence age and packet/track
+freshness are distinct.
+
+Elmers can group retained receiver health and reports by stable site ID, reconcile
+one incident per receiver/site condition, and keep aircraft identity separate
+from observer identity. These consumers are not wired by this library addition.
