@@ -65,6 +65,11 @@ descriptions.
 
 ## Development
 
+The optional `lua` feature provides a native decoder lifecycle wrapper and a
+bounded, reloadable packet-routing policy. See
+[Lua decoder policy](docs/lua-decoder-policy.md) for the interface and remaining
+host integration. It does not implement ADS-B decoding or start hardware.
+
 ```sh
 cargo check
 cargo test

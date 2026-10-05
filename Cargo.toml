@@ -10,7 +10,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
 rustfft = "6"
-stream-descriptors = { path = "../unibus/crates/stream-descriptors" }
+stream-descriptors = { git = "https://github.com/FuturePresentLabs/unibus.git", rev = "d7aaa980f8963209ade088b598b82688a3c158fd" }
+mlua = { version = "0.12", optional = true, features = ["lua54", "vendored", "serialize"] }
 dcp = { git = "https://github.com/FuturePresentLabs/dcp.git", rev = "d3a1335" }
 sha2 = "0.10"
 time = { version = "0.3", features = ["formatting"] }
@@ -19,3 +20,6 @@ subtle = "2"
 
 [dev-dependencies]
 tempfile = "3"
+
+[features]
+lua = ["dep:mlua"]
