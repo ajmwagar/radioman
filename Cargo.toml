@@ -17,9 +17,14 @@ sha2 = "0.10"
 time = { version = "0.3", features = ["formatting"] }
 tiny_http = "0.12"
 subtle = "2"
+adsb_deku = { git = "https://github.com/rsadsb/adsb_deku.git", rev = "e2bdf1e08d1ef1a8dbdea25f415cbd50170de60e" }
+rsadsb_common = { git = "https://github.com/rsadsb/adsb_deku.git", rev = "e2bdf1e08d1ef1a8dbdea25f415cbd50170de60e" }
+num-complex = "0.4"
+libdump1090_rs = { git = "https://github.com/rsadsb/dump1090_rs.git", rev = "94a0e4d74f816bdff996f22cd56c5d97ee010368" }
 
 [dev-dependencies]
 tempfile = "3"
+hex = "0.4"
 
 [features]
 lua = ["dep:mlua"]

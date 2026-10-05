@@ -17,9 +17,11 @@ return {
 }
 ```
 
-This is a tested **library boundary**, not a live decoder or daemon integration.
-`fixture` is illustrative, not a registered backend. There is no ADS-B decoder,
-Unibus sender, automatic file watcher, or dynamic native plugin ABI here.
+`mode_s_1090` is a registered native decoder and the `radioman adsb` command
+owns an RTL-SDR, decodes live CU8 samples, and emits canonical packets over
+UDP. `fixture` remains illustrative. There is no Unibus sender, automatic file
+watcher, or dynamic native plugin ABI here; transport adaptation remains a
+separate host boundary.
 
 The host must resolve decoder names against a registry, validate the tuning
 against the physical device, acquire exclusive ownership, and invoke a native
@@ -71,8 +73,9 @@ equipment requires updating the assignment; mobile fixes require deadlines.
 Invalid registry references, coordinates, future/expired evidence, and total
 serialized size above 64 KiB fail loudly.
 
-This is a tested library API, not a GPS collector, daemon config loader, deployed
-registry or live consumer integration. It never borrows GPS from another site.
+This is a tested library API, not a GPS collector or deployed registry. The
+live ADS-B command accepts an explicit fixed receiver location and never
+borrows GPS from another site.
 
 Panopticon should use aircraft coordinates from ADS-B payloads for aircraft
 tracks and retain reception location separately as provenance. RF summaries and

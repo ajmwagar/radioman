@@ -65,10 +65,22 @@ descriptions.
 
 ## Development
 
-The optional `lua` feature provides a native decoder lifecycle wrapper and a
-bounded, reloadable packet-routing policy. See
-[Lua decoder policy](docs/lua-decoder-policy.md) for the interface and remaining
-host integration. It does not implement ADS-B decoding or start hardware.
+Radioman includes a native 1090 MHz Mode-S/ADS-B decoder for configured
+RTL-SDR receivers. It emits one validated `radioman.adsb.observation.v1`
+`DecodedPacket` per UDP datagram; the receiver location is used only for CPR
+position resolution and is not substituted for an unknown aircraft position.
+
+```sh
+cargo run -- adsb CONFIG.toml RADIO_ID INSTALLATION_ID LAT LON \
+  127.0.0.1:50071 [GAIN_DB] [MAX_RANGE_KM]
+```
+
+The default gain is 38.6 dB and the default maximum decode range is 600 km.
+The command fails before decoding when the selected radio is not an RTL-SDR,
+cannot tune 1090 MHz, or has invalid site coordinates. `rtl_sdr` must be on
+`PATH`. The optional `lua` feature adds a bounded, reloadable routing policy on
+top of the native decoder lifecycle; see
+[Lua decoder policy](docs/lua-decoder-policy.md).
 
 ```sh
 cargo check

@@ -1,6 +1,8 @@
 use radioman::{
     DeviceIndex, ExperimentOutput, ExperimentRequest, PacketRadioDescriptor, RadioDescriptor,
     RadioKind, ServiceCommand, ServiceStatus, SpectrumFrame,
+    adsb::ModeS1090Decoder,
+    decoder::{DecoderConfig, DecoderSession},
 };
 use rustfft::{FftPlanner, num_complex::Complex32};
 use serde::Deserialize;
@@ -633,7 +635,7 @@ fn receive_spectrum(
                 ]),
                 media: MediaCharacteristics {
                     sample_format: Some("power-db".into()),
-                    sample_rate: Some(SAMPLE_RATE as u32),
+                    sample_rate: Some(SAMPLE_RATE),
                     ..Default::default()
                 },
                 freshness: Freshness::Live,
@@ -696,6 +698,85 @@ fn receive_spectrum(
     }
 }
 
+fn receive_adsb(
+    config: &Config,
+    radio_id: &str,
+    installation_id: &str,
+    receiver_position: (f64, f64),
+    destination: SocketAddr,
+    gain_db: f32,
+    maximum_range_km: f64,
+) -> Result<(), String> {
+    const FREQUENCY_HZ: u64 = 1_090_000_000;
+    const SAMPLE_RATE_HZ: u32 = 2_400_000;
+    const IQ_BLOCK_BYTES: usize = 240_000;
+
+    let radio = config.radio(radio_id)?;
+    if !matches!(radio.kind, RadioKind::RtlSdr) {
+        return Err("ADS-B backend currently supports RTL-SDR only".into());
+    }
+    if !radio.frequency.contains(FREQUENCY_HZ) {
+        return Err("1090 MHz is outside the configured radio range".into());
+    }
+    if !gain_db.is_finite() || !(0.0..=49.6).contains(&gain_db) {
+        return Err("RTL-SDR gain must be between 0 and 49.6 dB".into());
+    }
+
+    let serial = radio.serial.as_deref().unwrap_or("0");
+    let mut child = Command::new("rtl_sdr")
+        .args([
+            "-d",
+            serial,
+            "-f",
+            &FREQUENCY_HZ.to_string(),
+            "-s",
+            &SAMPLE_RATE_HZ.to_string(),
+            "-g",
+            &gain_db.to_string(),
+            "-",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .map_err(|error| format!("start rtl_sdr: {error}"))?;
+    let result = (|| {
+        let mut stdout = child.stdout.take().ok_or("rtl_sdr stdout is unavailable")?;
+        let socket =
+            UdpSocket::bind("0.0.0.0:0").map_err(|error| format!("bind ADS-B socket: {error}"))?;
+        socket
+            .connect(destination)
+            .map_err(|error| format!("connect ADS-B socket: {error}"))?;
+        let decoder = ModeS1090Decoder::new(installation_id, receiver_position, maximum_range_km)?;
+        let mut session = DecoderSession::new(decoder);
+        session.start(DecoderConfig {
+            decoder: "mode_s_1090".into(),
+            source: radio_id.into(),
+            frequency_hz: FREQUENCY_HZ,
+            sample_rate_hz: SAMPLE_RATE_HZ,
+        })?;
+        let mut iq = vec![0_u8; IQ_BLOCK_BYTES];
+        eprintln!(
+            "radioman: ADS-B radio={radio_id} installation={installation_id} gain={gain_db:.1}dB destination={destination}"
+        );
+        loop {
+            stdout
+                .read_exact(&mut iq)
+                .map_err(|error| format!("read rtl_sdr ADS-B IQ: {error}"))?;
+            for packet in session.process(&iq)? {
+                let payload = serde_json::to_vec(&packet)
+                    .map_err(|error| format!("encode ADS-B packet: {error}"))?;
+                socket
+                    .send(&payload)
+                    .map_err(|error| format!("send ADS-B packet: {error}"))?;
+            }
+        }
+    })();
+    let _ = child.kill();
+    let _ = child.wait();
+    result
+}
+
 impl Config {
     fn validate(&self) -> Result<(), String> {
         if self.schema_version != radioman::CONFIG_VERSION {
@@ -727,12 +808,12 @@ fn read_config(path: &str) -> Result<Config, String> {
 }
 
 fn mono_s16le_to_stereo_f32le(input: &[u8], output: &mut Vec<u8>) -> Result<(), String> {
-    if input.len() % 2 != 0 {
+    if !input.len().is_multiple_of(2) {
         return Err("rtl_fm produced a partial s16le sample".into());
     }
     output.clear();
     output.reserve(input.len() * 4);
-    for sample in input.chunks_exact(2) {
+    for sample in input.as_chunks::<2>().0 {
         let value = f32::from(i16::from_le_bytes([sample[0], sample[1]])) / 32_768.0;
         output.extend_from_slice(&value.to_le_bytes());
         output.extend_from_slice(&value.to_le_bytes());
@@ -889,9 +970,55 @@ fn run() -> Result<(), String> {
             let radio_id = args.get(7).map(String::as_str);
             receive_spectrum(&config, radio_id, frequency, destination, gain, tuning)
         }
+        [
+            _,
+            command,
+            path,
+            radio_id,
+            installation_id,
+            latitude,
+            longitude,
+            destination,
+            rest @ ..,
+        ] if command == "adsb" => {
+            let config = read_config(path)?;
+            let latitude = latitude
+                .parse::<f64>()
+                .map_err(|error| format!("invalid receiver latitude: {error}"))?;
+            let longitude = longitude
+                .parse::<f64>()
+                .map_err(|error| format!("invalid receiver longitude: {error}"))?;
+            let destination = destination
+                .parse::<SocketAddr>()
+                .map_err(|error| format!("invalid ADS-B destination: {error}"))?;
+            let gain = rest
+                .first()
+                .map(|value| value.parse::<f32>())
+                .transpose()
+                .map_err(|error| format!("invalid gain: {error}"))?
+                .unwrap_or(38.6);
+            let maximum_range_km = rest
+                .get(1)
+                .map(|value| value.parse::<f64>())
+                .transpose()
+                .map_err(|error| format!("invalid maximum range: {error}"))?
+                .unwrap_or(600.0);
+            if rest.len() > 2 {
+                return Err("too many ADS-B arguments".into());
+            }
+            receive_adsb(
+                &config,
+                radio_id,
+                installation_id,
+                (latitude, longitude),
+                destination,
+                gain,
+                maximum_range_km,
+            )
+        }
         _ => Err(format!(
-            "usage:\n  {} validate-config CONFIG.toml\n  {} device-index CONFIG.toml\n  {} serve CONFIG.toml CONTROL_SOCKET\n  {} control CONTROL_SOCKET JSON\n  {} dcp-serve CONFIG.toml CONTROL_SOCKET LISTEN SPECTRUM_DEST TOKEN_FILE\n  {} fm CONFIG.toml CENTER_HZ PCM_DEST [GAIN_DB]\n  {} spectrum CONFIG.toml CENTER_HZ UDP_DEST [GAIN_DB] [TUNING_JSON] [RADIO_ID]",
-            args[0], args[0], args[0], args[0], args[0], args[0], args[0]
+            "usage:\n  {} validate-config CONFIG.toml\n  {} device-index CONFIG.toml\n  {} serve CONFIG.toml CONTROL_SOCKET\n  {} control CONTROL_SOCKET JSON\n  {} dcp-serve CONFIG.toml CONTROL_SOCKET LISTEN SPECTRUM_DEST TOKEN_FILE\n  {} fm CONFIG.toml CENTER_HZ PCM_DEST [GAIN_DB]\n  {} spectrum CONFIG.toml CENTER_HZ UDP_DEST [GAIN_DB] [TUNING_JSON] [RADIO_ID]\n  {} adsb CONFIG.toml RADIO_ID INSTALLATION_ID LAT LON UDP_DEST [GAIN_DB] [MAX_RANGE_KM]",
+            args[0], args[0], args[0], args[0], args[0], args[0], args[0], args[0]
         )),
     }
 }
@@ -916,8 +1043,10 @@ mod tests {
         let mut output = Vec::new();
         mono_s16le_to_stereo_f32le(&[0, 0, 0xff, 0x7f, 0, 0x80], &mut output).unwrap();
         let samples = output
-            .chunks_exact(4)
-            .map(|sample| f32::from_le_bytes(sample.try_into().unwrap()))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|sample| f32::from_le_bytes(*sample))
             .collect::<Vec<_>>();
         assert_eq!(samples[0], 0.0);
         assert_eq!(samples[0], samples[1]);

@@ -7,6 +7,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
+pub mod adsb;
 pub mod dcp;
 pub mod decoder;
 pub mod location;
