@@ -75,6 +75,11 @@ cargo run -- adsb CONFIG.toml RADIO_ID INSTALLATION_ID LAT LON \
   127.0.0.1:50071 [GAIN_DB] [MAX_RANGE_KM]
 ```
 
+Use `unibus:/path/to/client.json` in place of the UDP address to publish the
+same observations as typed `radio/adsb/observations` stream events. The client
+grant must permit `unibus.stream.event.v1` and should claim the
+`unibus.stream.source` capability.
+
 The default gain is 38.6 dB and the default maximum decode range is 600 km.
 The command fails before decoding when the selected radio is not an RTL-SDR,
 cannot tune 1090 MHz, or has invalid site coordinates. `rtl_sdr` must be on

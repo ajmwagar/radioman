@@ -25,6 +25,86 @@ use stream_descriptors::{
 };
 use subtle::ConstantTimeEq;
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
+use unibus::{
+    Message, STREAM_EVENT_KIND, StreamEvent,
+    client::{Client as UnibusClient, ClientConfig as UnibusClientConfig},
+};
+
+const ADSB_STREAM_ID: &str = "radio/adsb/observations";
+
+enum AdsbSink {
+    Udp(UdpSocket),
+    Unibus {
+        client: Box<UnibusClient>,
+        sequence: u64,
+    },
+}
+
+impl AdsbSink {
+    fn connect(destination: &str) -> Result<Self, String> {
+        if let Some(path) = destination.strip_prefix("unibus:") {
+            let bytes = fs::read(path).map_err(|error| format!("read Unibus config: {error}"))?;
+            let config: UnibusClientConfig = serde_json::from_slice(&bytes)
+                .map_err(|error| format!("parse Unibus config: {error}"))?;
+            let client = UnibusClient::connect(config)
+                .map_err(|error| format!("connect Unibus: {error:#}"))?;
+            return Ok(Self::Unibus {
+                client: Box::new(client),
+                sequence: 0,
+            });
+        }
+        let destination = destination
+            .parse::<SocketAddr>()
+            .map_err(|error| format!("invalid ADS-B destination: {error}"))?;
+        let socket =
+            UdpSocket::bind("0.0.0.0:0").map_err(|error| format!("bind ADS-B socket: {error}"))?;
+        socket
+            .connect(destination)
+            .map_err(|error| format!("connect ADS-B socket: {error}"))?;
+        Ok(Self::Udp(socket))
+    }
+
+    fn send(&mut self, packet: &radioman::decoder::DecodedPacket) -> Result<(), String> {
+        match self {
+            Self::Udp(socket) => {
+                let payload = serde_json::to_vec(packet)
+                    .map_err(|error| format!("encode ADS-B packet: {error}"))?;
+                socket
+                    .send(&payload)
+                    .map_err(|error| format!("send ADS-B packet: {error}"))?;
+            }
+            Self::Unibus { client, sequence } => {
+                *sequence = sequence
+                    .checked_add(1)
+                    .ok_or("ADS-B stream sequence overflow")?;
+                let event = StreamEvent {
+                    stream_id: ADSB_STREAM_ID.into(),
+                    contract: packet.contract.clone(),
+                    sequence: *sequence,
+                    observed_at_unix_ms: packet.observed_at_unix_ms,
+                    value: packet.value.clone(),
+                };
+                event
+                    .validate()
+                    .map_err(|error| format!("validate ADS-B stream event: {error:#}"))?;
+                let envelope = client
+                    .envelope(
+                        None,
+                        Message::new(
+                            STREAM_EVENT_KIND,
+                            serde_json::to_value(event)
+                                .map_err(|error| format!("encode ADS-B stream event: {error}"))?,
+                        ),
+                    )
+                    .map_err(|error| format!("create Unibus ADS-B envelope: {error:#}"))?;
+                client
+                    .send(&envelope, &[])
+                    .map_err(|error| format!("publish ADS-B stream event: {error:#}"))?;
+            }
+        }
+        Ok(())
+    }
+}
 
 struct ActiveExperiment {
     request: ExperimentRequest,
@@ -703,7 +783,7 @@ fn receive_adsb(
     radio_id: &str,
     installation_id: &str,
     receiver_position: (f64, f64),
-    destination: SocketAddr,
+    destination: &str,
     gain_db: f32,
     maximum_range_km: f64,
 ) -> Result<(), String> {
@@ -742,11 +822,7 @@ fn receive_adsb(
         .map_err(|error| format!("start rtl_sdr: {error}"))?;
     let result = (|| {
         let mut stdout = child.stdout.take().ok_or("rtl_sdr stdout is unavailable")?;
-        let socket =
-            UdpSocket::bind("0.0.0.0:0").map_err(|error| format!("bind ADS-B socket: {error}"))?;
-        socket
-            .connect(destination)
-            .map_err(|error| format!("connect ADS-B socket: {error}"))?;
+        let mut sink = AdsbSink::connect(destination)?;
         let decoder = ModeS1090Decoder::new(installation_id, receiver_position, maximum_range_km)?;
         let mut session = DecoderSession::new(decoder);
         session.start(DecoderConfig {
@@ -764,11 +840,7 @@ fn receive_adsb(
                 .read_exact(&mut iq)
                 .map_err(|error| format!("read rtl_sdr ADS-B IQ: {error}"))?;
             for packet in session.process(&iq)? {
-                let payload = serde_json::to_vec(&packet)
-                    .map_err(|error| format!("encode ADS-B packet: {error}"))?;
-                socket
-                    .send(&payload)
-                    .map_err(|error| format!("send ADS-B packet: {error}"))?;
+                sink.send(&packet)?;
             }
         }
     })();
@@ -988,9 +1060,6 @@ fn run() -> Result<(), String> {
             let longitude = longitude
                 .parse::<f64>()
                 .map_err(|error| format!("invalid receiver longitude: {error}"))?;
-            let destination = destination
-                .parse::<SocketAddr>()
-                .map_err(|error| format!("invalid ADS-B destination: {error}"))?;
             let gain = rest
                 .first()
                 .map(|value| value.parse::<f32>())
@@ -1017,7 +1086,7 @@ fn run() -> Result<(), String> {
             )
         }
         _ => Err(format!(
-            "usage:\n  {} validate-config CONFIG.toml\n  {} device-index CONFIG.toml\n  {} serve CONFIG.toml CONTROL_SOCKET\n  {} control CONTROL_SOCKET JSON\n  {} dcp-serve CONFIG.toml CONTROL_SOCKET LISTEN SPECTRUM_DEST TOKEN_FILE\n  {} fm CONFIG.toml CENTER_HZ PCM_DEST [GAIN_DB]\n  {} spectrum CONFIG.toml CENTER_HZ UDP_DEST [GAIN_DB] [TUNING_JSON] [RADIO_ID]\n  {} adsb CONFIG.toml RADIO_ID INSTALLATION_ID LAT LON UDP_DEST [GAIN_DB] [MAX_RANGE_KM]",
+            "usage:\n  {} validate-config CONFIG.toml\n  {} device-index CONFIG.toml\n  {} serve CONFIG.toml CONTROL_SOCKET\n  {} control CONTROL_SOCKET JSON\n  {} dcp-serve CONFIG.toml CONTROL_SOCKET LISTEN SPECTRUM_DEST TOKEN_FILE\n  {} fm CONFIG.toml CENTER_HZ PCM_DEST [GAIN_DB]\n  {} spectrum CONFIG.toml CENTER_HZ UDP_DEST [GAIN_DB] [TUNING_JSON] [RADIO_ID]\n  {} adsb CONFIG.toml RADIO_ID INSTALLATION_ID LAT LON UDP_DEST|unibus:CONFIG.json [GAIN_DB] [MAX_RANGE_KM]",
             args[0], args[0], args[0], args[0], args[0], args[0], args[0], args[0]
         )),
     }
