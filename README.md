@@ -63,6 +63,17 @@ UniBus using `unibus/config/dcp-radioman.json`. Spectrum and IQ payloads remain
 on their announced UDP/QUIC paths; DCP and UniBus carry only decisions and
 descriptions.
 
+The same bearer-authenticated listener also serves `/v1/catalog` and
+`/v1/health` using Unibus's shared service inventory contracts. These read-only
+routes do not require DCP-Version; the native DCP routes still do. Inventory
+comes from the registered device index and current tuner status, with a
+six-second lease. A failed control socket reports disconnected and advertises
+no control operation. Hardware connectivity/free capacity is not inferred
+from configuration, and the legacy spectrum stream is not mislabeled as v2.
+The optional `unibus-services publish` client can distribute these documents
+using a locally stored bearer token. Radioman itself gains no Unibus/Mycelium
+runtime dependency; controls remain revision-bound DCP actions.
+
 ## Development
 
 ```sh

@@ -325,6 +325,30 @@ fn dcp_serve(
             )?;
             continue;
         }
+        let service_path = request.url().split('?').next().unwrap_or(request.url());
+        if request.method() == &Method::Get && matches!(service_path, "/v1/catalog" | "/v1/health")
+        {
+            let is_health = service_path == "/v1/health";
+            let projection = match current_status(socket_path) {
+                Ok(status) => radioman::services::project(&devices, &status),
+                Err(_) => radioman::services::unreachable(&devices, now_ms()),
+            };
+            match projection {
+                Ok((catalog, health)) => {
+                    if is_health {
+                        respond_json(request, 200, &health)?;
+                    } else {
+                        respond_json(request, 200, &catalog)?;
+                    }
+                }
+                Err(_) => respond_json(
+                    request,
+                    503,
+                    &serde_json::json!({"code":"tuner_status_unavailable"}),
+                )?,
+            }
+            continue;
+        }
         let version = request
             .headers()
             .iter()
@@ -633,7 +657,7 @@ fn receive_spectrum(
                 ]),
                 media: MediaCharacteristics {
                     sample_format: Some("power-db".into()),
-                    sample_rate: Some(SAMPLE_RATE as u32),
+                    sample_rate: Some(SAMPLE_RATE),
                     ..Default::default()
                 },
                 freshness: Freshness::Live,
@@ -727,12 +751,13 @@ fn read_config(path: &str) -> Result<Config, String> {
 }
 
 fn mono_s16le_to_stereo_f32le(input: &[u8], output: &mut Vec<u8>) -> Result<(), String> {
-    if input.len() % 2 != 0 {
+    let (samples, remainder) = input.as_chunks::<2>();
+    if !remainder.is_empty() {
         return Err("rtl_fm produced a partial s16le sample".into());
     }
     output.clear();
     output.reserve(input.len() * 4);
-    for sample in input.chunks_exact(2) {
+    for sample in samples {
         let value = f32::from(i16::from_le_bytes([sample[0], sample[1]])) / 32_768.0;
         output.extend_from_slice(&value.to_le_bytes());
         output.extend_from_slice(&value.to_le_bytes());
@@ -908,6 +933,85 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn service_http_keeps_bearer_auth_and_native_dcp_version_boundary() {
+        use std::{
+            io::{Read, Write},
+            net::{TcpListener, TcpStream},
+            time::{Duration, Instant},
+        };
+        let config: super::Config = serde_json::from_value(serde_json::json!({
+        "schema_version":2,"node_id":"radio-pi","iq_bind":"127.0.0.1:51001",
+        "iq_advertise":"udp://127.0.0.1:51001","radios":[{
+            "id":"rtl-sdr","kind":"rtl_sdr","label":"RTL-SDR","serial":null,
+            "frequency":{"minimum_hz":24000000,"maximum_hz":1766000000},
+            "sample_rates_hz":[2048000],"sample_formats":["cu8"],"receive":true,"transmit":false
+        }]}))
+        .unwrap();
+        config.validate().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let token = "0123456789abcdef0123456789abcdef";
+        let token_path = directory.path().join("token");
+        std::fs::write(&token_path, token).unwrap();
+        let socket = directory.path().join("missing-control.sock");
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        std::thread::spawn(move || {
+            super::dcp_serve(
+                &config,
+                socket.to_str().unwrap(),
+                &address.to_string(),
+                "127.0.0.1:51002",
+                token_path.to_str().unwrap(),
+            )
+            .unwrap()
+        });
+        let request = |path: &str, authorized: bool| {
+            let until = Instant::now() + Duration::from_secs(3);
+            let mut stream = loop {
+                match TcpStream::connect(address) {
+                    Ok(stream) => break stream,
+                    Err(_) => {
+                        assert!(Instant::now() < until);
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                }
+            };
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let authorization = if authorized {
+                format!("Authorization: Bearer {token}\r\n")
+            } else {
+                String::new()
+            };
+            write!(
+                stream,
+                "GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n{authorization}\r\n"
+            )
+            .unwrap();
+            let mut result = String::new();
+            stream.read_to_string(&mut result).unwrap();
+            result
+        };
+        assert!(request("/v1/catalog", false).starts_with("HTTP/1.1 401"));
+        let health = request("/v1/health", true);
+        assert!(health.starts_with("HTTP/1.1 200"));
+        let health: stream_descriptors::service::ServiceHealth =
+            serde_json::from_str(health.split_once("\r\n\r\n").unwrap().1).unwrap();
+        assert_eq!(
+            health.state,
+            stream_descriptors::service::HealthState::Disconnected
+        );
+        let catalog = request("/v1/catalog", true);
+        assert!(catalog.starts_with("HTTP/1.1 200"));
+        let catalog: stream_descriptors::service::ServiceCatalog =
+            serde_json::from_str(catalog.split_once("\r\n\r\n").unwrap().1).unwrap();
+        assert!(catalog.resources[0].operations.is_empty());
+        assert!(request("/v1/decisions", true).starts_with("HTTP/1.1 406"));
+    }
+
     use super::{mono_s16le_to_stereo_f32le, spectrum_bins};
     use rustfft::FftPlanner;
 
@@ -916,8 +1020,10 @@ mod tests {
         let mut output = Vec::new();
         mono_s16le_to_stereo_f32le(&[0, 0, 0xff, 0x7f, 0, 0x80], &mut output).unwrap();
         let samples = output
-            .chunks_exact(4)
-            .map(|sample| f32::from_le_bytes(sample.try_into().unwrap()))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|sample| f32::from_le_bytes(*sample))
             .collect::<Vec<_>>();
         assert_eq!(samples[0], 0.0);
         assert_eq!(samples[0], samples[1]);
