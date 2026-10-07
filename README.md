@@ -94,3 +94,11 @@ Licensed under either of
 - MIT License ([LICENSE-MIT](LICENSE-MIT))
 
 at your option.
+
+## Radio mesh observations
+
+`cargo run -- mesh-serve CONFIG.toml` provides a receive-only local snapshot
+for Meshtastic JSON and explicit MeshCore owner exports via the existing
+Unibus MQTT subscriber. See [radio mesh setup and ABI](docs/radio-mesh.md)
+for exact topic ACLs, certificate enrollment, sparse-position semantics and
+runtime health checks.

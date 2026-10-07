@@ -835,6 +835,7 @@ fn receive_fm(
 fn run() -> Result<(), String> {
     let args = env::args().collect::<Vec<_>>();
     match args.as_slice() {
+        [_, command, path] if command == "mesh-serve" => radioman::mesh_service::serve(path),
         [_, command, path] if command == "validate-config" => {
             let config = read_config(path)?;
             println!(
@@ -915,8 +916,8 @@ fn run() -> Result<(), String> {
             receive_spectrum(&config, radio_id, frequency, destination, gain, tuning)
         }
         _ => Err(format!(
-            "usage:\n  {} validate-config CONFIG.toml\n  {} device-index CONFIG.toml\n  {} serve CONFIG.toml CONTROL_SOCKET\n  {} control CONTROL_SOCKET JSON\n  {} dcp-serve CONFIG.toml CONTROL_SOCKET LISTEN SPECTRUM_DEST TOKEN_FILE\n  {} fm CONFIG.toml CENTER_HZ PCM_DEST [GAIN_DB]\n  {} spectrum CONFIG.toml CENTER_HZ UDP_DEST [GAIN_DB] [TUNING_JSON] [RADIO_ID]",
-            args[0], args[0], args[0], args[0], args[0], args[0], args[0]
+            "usage:\n  {} mesh-serve CONFIG.toml\n  {} validate-config CONFIG.toml\n  {} device-index CONFIG.toml\n  {} serve CONFIG.toml CONTROL_SOCKET\n  {} control CONTROL_SOCKET JSON\n  {} dcp-serve CONFIG.toml CONTROL_SOCKET LISTEN SPECTRUM_DEST TOKEN_FILE\n  {} fm CONFIG.toml CENTER_HZ PCM_DEST [GAIN_DB]\n  {} spectrum CONFIG.toml CENTER_HZ UDP_DEST [GAIN_DB] [TUNING_JSON] [RADIO_ID]",
+            args[0], args[0], args[0], args[0], args[0], args[0], args[0], args[0]
         )),
     }
 }
