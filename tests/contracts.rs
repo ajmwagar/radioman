@@ -356,3 +356,65 @@ fn dcp_execution_rejects_stale_state_before_emitting_a_command() {
         .unwrap();
     assert!(matches!(command, ServiceCommand::Submit { .. }));
 }
+
+#[test]
+fn dcp_selects_the_hackrf_rate_and_signed_sample_format() {
+    let mut radio = rtl();
+    radio.kind = RadioKind::HackRf;
+    radio.id = "hackrf/test".into();
+    radio.serial = Some("abc123".into());
+    radio.sample_rates_hz = BTreeSet::from([2_000_000]);
+    radio.sample_formats = BTreeSet::from([SampleFormat::Cs8]);
+    radio.frequency.maximum_hz = 6_000_000_000;
+    let devices = DeviceIndex {
+        schema_version: 1,
+        node_id: "pi".into(),
+        radios: vec![radio],
+        packet_radios: vec![],
+    };
+    let status = ServiceStatus {
+        schema_version: 1,
+        active: None,
+        queued_session_ids: vec![],
+        observed_at_ms: 1000,
+        error: None,
+    };
+    let projection = radioman::dcp::Projection {
+        devices: &devices,
+        status: &status,
+        spectrum_destination: "127.0.0.1:50070",
+    };
+    let catalog = projection.catalog().unwrap();
+    let command = projection
+        .command(&dcp::ExecuteRequest {
+            dcp_version: dcp::VERSION.into(),
+            request_id: "request-hackrf".into(),
+            decision_id: "decision-hackrf".into(),
+            action_id: "radioman.spectrum.start".into(),
+            arguments: BTreeMap::from([
+                ("session_id".into(), serde_json::json!("satellite")),
+                ("radio_id".into(), serde_json::json!("hackrf/test")),
+                (
+                    "center_frequency_hz".into(),
+                    serde_json::json!(1_694_100_000),
+                ),
+                ("duration_ms".into(), serde_json::json!(1000)),
+            ]),
+            phase: dcp::Phase::Commit,
+            expected_catalog_revision: catalog.catalog_revision,
+            expected_state_revision: catalog.state_revision,
+            prepared_receipt_id: None,
+            confirmed: false,
+            evidence: dcp::Evidence {
+                utterance_id: "u".into(),
+                transcript_revision: 1,
+                final_: true,
+            },
+        })
+        .unwrap();
+    let ServiceCommand::Submit { experiment } = command else {
+        panic!("expected submit")
+    };
+    assert_eq!(experiment.rx.sample_rate_hz, 2_000_000);
+    assert_eq!(experiment.rx.sample_format, SampleFormat::Cs8);
+}

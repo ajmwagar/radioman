@@ -368,6 +368,7 @@ dependencies = [
 [[package]]
 name = "stream-descriptors"
 version = "0.1.0"
+source = "git+https://github.com/FuturePresentLabs/unibus.git?rev=dae96d7e9873b5d8e830f444203ecce72467e6cf#dae96d7e9873b5d8e830f444203ecce72467e6cf"
 dependencies = [
  "serde",
  "serde_json",

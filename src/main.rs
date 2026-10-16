@@ -64,9 +64,6 @@ fn spawn_experiment(
     let ExperimentOutput::Spectrum { destination } = &request.output else {
         return Err("this backend currently executes spectrum experiments only".into());
     };
-    if request.rx.sample_rate_hz != 2_048_000 {
-        return Err("spectrum experiments require 2048000 samples/s".into());
-    }
     let executable = env::current_exe().map_err(|e| format!("locate radioman: {e}"))?;
     let child = Command::new("setsid")
         .arg(executable)
@@ -179,6 +176,11 @@ fn serve(config_path: &str, socket_path: &str) -> Result<(), String> {
                             }
                             let radio = config.radio(&replacement.rx.radio_id)?;
                             replacement.validate_for(radio)?;
+                            radioman::receiver::validate(
+                                radio,
+                                center_frequency_hz,
+                                replacement.rx.gain_db.unwrap_or(19.7),
+                            )?;
 
                             // Validation happens before disrupting the current
                             // receiver. rtl_sdr cannot retune in place, so this
@@ -196,12 +198,20 @@ fn serve(config_path: &str, socket_path: &str) -> Result<(), String> {
                         let result = config
                             .radio(&experiment.rx.radio_id)
                             .and_then(|radio| {
-                                if !matches!(radio.kind, RadioKind::RtlSdr) {
+                                let (rate, format) = radioman::receiver::spectrum_format(radio)?;
+                                if experiment.rx.sample_rate_hz != rate
+                                    || experiment.rx.sample_format != format
+                                {
                                     return Err(
-                                        "this backend currently executes RTL-SDR experiments only"
+                                        "experiment rate/format does not match receive backend"
                                             .into(),
                                     );
                                 }
+                                radioman::receiver::validate(
+                                    radio,
+                                    experiment.rx.center_frequency_hz,
+                                    experiment.rx.gain_db.unwrap_or(19.7),
+                                )?;
                                 experiment.validate_for(radio)
                             })
                             .and_then(|_| {
@@ -545,19 +555,32 @@ impl Config {
     }
 }
 
+#[cfg(test)]
 fn spectrum_bins(iq: &[u8], planner: &mut FftPlanner<f32>) -> Result<Vec<f32>, String> {
+    spectrum_bins_format(iq, planner, &radioman::SampleFormat::Cu8)
+}
+
+fn spectrum_bins_format(
+    iq: &[u8],
+    planner: &mut FftPlanner<f32>,
+    format: &radioman::SampleFormat,
+) -> Result<Vec<f32>, String> {
     const FFT: usize = 1024;
     const BINS: usize = 128;
     if iq.len() < FFT * 2 {
-        return Err("RTL-SDR produced a partial FFT window".into());
+        return Err("receiver produced a partial FFT window".into());
     }
+    let sample = |byte: u8| match format {
+        radioman::SampleFormat::Cs8 => f32::from(byte as i8) / 128.0,
+        _ => (f32::from(byte) - 127.5) / 127.5,
+    };
     let mut samples = (0..FFT)
         .map(|index| {
             let phase = 2.0 * std::f32::consts::PI * index as f32 / (FFT - 1) as f32;
             let window = 0.5 - 0.5 * phase.cos();
             Complex32::new(
-                (f32::from(iq[index * 2]) - 127.5) / 127.5 * window,
-                (f32::from(iq[index * 2 + 1]) - 127.5) / 127.5 * window,
+                sample(iq[index * 2]) * window,
+                sample(iq[index * 2 + 1]) * window,
             )
         })
         .collect::<Vec<_>>();
@@ -586,39 +609,22 @@ fn receive_spectrum(
     gain_db: f32,
     tuning: Option<radioman::ActiveTuning>,
 ) -> Result<(), String> {
-    const SAMPLE_RATE: u32 = 2_048_000;
     let radio = match radio_id {
         Some(id) => config.radio(id)?,
         None => config.rtl_radio()?,
     };
-    if !matches!(radio.kind, RadioKind::RtlSdr) {
-        return Err("spectrum backend currently supports RTL-SDR only".into());
-    }
-    if !radio.frequency.contains(center_frequency_hz) {
-        return Err("spectrum center frequency is outside the configured radio range".into());
-    }
-    if !gain_db.is_finite() || !(0.0..=49.6).contains(&gain_db) {
-        return Err("RTL-SDR gain must be between 0 and 49.6 dB".into());
-    }
-    let serial = radio.serial.as_deref().unwrap_or("0");
-    let mut child = Command::new("rtl_sdr")
-        .args([
-            "-d",
-            serial,
-            "-f",
-            &center_frequency_hz.to_string(),
-            "-s",
-            &SAMPLE_RATE.to_string(),
-            "-g",
-            &gain_db.to_string(),
-            "-",
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .map_err(|error| format!("start rtl_sdr: {error}"))?;
-    let mut stdout = child.stdout.take().ok_or("rtl_sdr stdout is unavailable")?;
+    let (sample_rate, sample_format) = radioman::receiver::spectrum_format(radio)?;
+    let _claim = radioman::receiver::claim(radio)?;
+    let mut child = radioman::receiver::Receiver(
+        radioman::receiver::iq_command(radio, center_frequency_hz, gain_db)?
+            .spawn()
+            .map_err(|error| format!("start IQ receiver: {error}"))?,
+    );
+    let mut stdout = child
+        .0
+        .stdout
+        .take()
+        .ok_or("receiver stdout is unavailable")?;
     let socket =
         UdpSocket::bind("0.0.0.0:0").map_err(|error| format!("bind spectrum socket: {error}"))?;
     socket
@@ -630,12 +636,12 @@ fn receive_spectrum(
     let mut next_frame = Instant::now();
     let mut next_descriptor = Instant::now();
     eprintln!(
-        "radioman: spectrum center={center_frequency_hz}Hz span={SAMPLE_RATE}Hz gain={gain_db:.1}dB destination={destination}"
+        "radioman: spectrum center={center_frequency_hz}Hz span={sample_rate}Hz gain={gain_db:.1}dB destination={destination}"
     );
     loop {
         stdout
             .read_exact(&mut iq)
-            .map_err(|error| format!("read rtl_sdr IQ: {error}"))?;
+            .map_err(|error| format!("read receiver IQ: {error}"))?;
         if Instant::now() < next_frame {
             continue;
         }
@@ -645,7 +651,7 @@ fn receive_spectrum(
                 schema_version: SCHEMA_VERSION,
                 stream_id: "radio/spectrum/live".into(),
                 semantic_type: "rf.spectrum".into(),
-                source_resource: "radio/rtl-sdr".into(),
+                source_resource: format!("radio/{}", radio.id),
                 content: BTreeMap::from([
                     ("role".into(), serde_json::json!("radio-analysis")),
                     (
@@ -657,7 +663,7 @@ fn receive_spectrum(
                 ]),
                 media: MediaCharacteristics {
                     sample_format: Some("power-db".into()),
-                    sample_rate: Some(SAMPLE_RATE),
+                    sample_rate: Some(sample_rate),
                     ..Default::default()
                 },
                 freshness: Freshness::Live,
@@ -705,10 +711,10 @@ fn receive_spectrum(
                 .unwrap_or_default()
                 .as_millis() as u64,
             center_frequency_hz,
-            span_hz: SAMPLE_RATE,
+            span_hz: sample_rate,
             floor_dbfs: -100.0,
             ceiling_dbfs: -10.0,
-            bins_dbfs: spectrum_bins(&iq, &mut planner)?,
+            bins_dbfs: spectrum_bins_format(&iq, &mut planner, &sample_format)?,
             tuning: tuning.clone(),
         };
         frame.validate()?;
@@ -832,6 +838,14 @@ fn receive_fm(
     }
 }
 
+fn parse_tuning(value: Option<&str>) -> Result<Option<radioman::ActiveTuning>, String> {
+    value
+        .map(serde_json::from_str::<Option<radioman::ActiveTuning>>)
+        .transpose()
+        .map(Option::flatten)
+        .map_err(|error| format!("invalid active tuning: {error}"))
+}
+
 fn run() -> Result<(), String> {
     let args = env::args().collect::<Vec<_>>();
     match args.as_slice() {
@@ -867,6 +881,116 @@ fn run() -> Result<(), String> {
         ] if command == "dcp-serve" => {
             let config = read_config(path)?;
             dcp_serve(&config, socket, listen, spectrum_destination, token_file)
+        }
+        [_, command, path, radio_id, frequency, seconds, output]
+        | [_, command, path, radio_id, frequency, seconds, output, _]
+            if command == "capture" =>
+        {
+            let config = read_config(path)?;
+            let radio = config.radio(radio_id)?;
+            let frequency = frequency
+                .parse::<u64>()
+                .map_err(|e| format!("invalid frequency: {e}"))?;
+            let seconds = seconds
+                .parse::<u64>()
+                .map_err(|e| format!("invalid duration: {e}"))?;
+            if !(1..=60).contains(&seconds) {
+                return Err("capture duration must be 1..=60 seconds".into());
+            }
+            let gain = args
+                .get(7)
+                .map(|s| s.parse::<f32>())
+                .transpose()
+                .map_err(|e| format!("invalid gain: {e}"))?
+                .unwrap_or(20.0);
+            let mut command = radioman::receiver::iq_command(radio, frequency, gain)?;
+            let (rate, format) = radioman::receiver::spectrum_format(radio)?;
+            let _claim = radioman::receiver::claim(radio)?;
+            let data_path = format!("{output}.sigmf-data");
+            let meta_path = format!("{output}.sigmf-meta");
+            let mut meta = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&meta_path)
+                .map_err(|e| format!("create capture metadata: {e}"))?;
+            let mut data = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&data_path)
+                .map_err(|e| format!("create capture data: {e}"))?;
+            let mut receiver = radioman::receiver::Receiver(
+                command
+                    .spawn()
+                    .map_err(|e| format!("start IQ receiver: {e}"))?,
+            );
+            let input = receiver
+                .0
+                .stdout
+                .take()
+                .ok_or("receiver stdout unavailable")?;
+            let expected = u64::from(rate) * seconds * format.bytes_per_complex_sample();
+            let size = std::io::copy(&mut input.take(expected), &mut data)
+                .map_err(|e| format!("capture IQ: {e}"))?;
+            if size != expected {
+                return Err(format!(
+                    "receiver ended early: {size}/{expected} bytes; capture is incomplete"
+                ));
+            }
+            // @implements github:sigmf/SigMF@60121977f5f8d1145553251a3b3d0dbe2819aa14 sigmf-schema.json -- core IQ recording metadata
+            let metadata = serde_json::json!({"global":{"core:datatype":if format == radioman::SampleFormat::Cs8 {"ci8"} else {"cu8"},"core:sample_rate":rate,"core:version":"1.2.6","core:recorder":"radioman","core:description":format!("Receive-only capture from {}", radio.id)},"captures":[{"core:sample_start":0,"core:frequency":frequency}],"annotations":[]});
+            serde_json::to_writer_pretty(&mut meta, &metadata).map_err(|e| e.to_string())?;
+            data.sync_all().map_err(|e| e.to_string())?;
+            meta.sync_all().map_err(|e| e.to_string())?;
+            println!("captured {size} bytes to {data_path} ({rate} samples/s)");
+            Ok(())
+        }
+        [_, command, path, radio_id, frequency, destination]
+        | [_, command, path, radio_id, frequency, destination, _]
+            if command == "nfm" =>
+        {
+            let config = read_config(path)?;
+            let radio = config.radio(radio_id)?;
+            let frequency = frequency
+                .parse::<u64>()
+                .map_err(|e| format!("invalid frequency: {e}"))?;
+            let destination = destination
+                .parse::<SocketAddr>()
+                .map_err(|e| format!("invalid PCM destination: {e}"))?;
+            let gain = args
+                .get(6)
+                .map(|s| s.parse::<f32>())
+                .transpose()
+                .map_err(|e| format!("invalid gain: {e}"))?
+                .unwrap_or(20.0);
+            let _claim = radioman::receiver::claim(radio)?;
+            let mut receiver = radioman::receiver::Receiver(
+                radioman::receiver::nfm_command(radio, frequency, gain)?
+                    .spawn()
+                    .map_err(|e| format!("start NFM receiver: {e}"))?,
+            );
+            let mut input = receiver
+                .0
+                .stdout
+                .take()
+                .ok_or("receiver stdout unavailable")?;
+            let socket = UdpSocket::bind("0.0.0.0:0").map_err(|e| e.to_string())?;
+            socket.connect(destination).map_err(|e| e.to_string())?;
+            let mut pcm = [0; 960];
+            let mut output = Vec::new();
+            loop {
+                input
+                    .read_exact(&mut pcm)
+                    .map_err(|e| format!("read NFM PCM: {e}"))?;
+                mono_s16le_to_stereo_f32le(&pcm, &mut output)?;
+                let output: Vec<u8> = output
+                    .chunks_exact(8)
+                    .flat_map(|frame| frame.iter().chain(frame.iter()).copied())
+                    .collect();
+                // 120 stereo frames per datagram avoids IP fragmentation.
+                for packet in output.chunks(960) {
+                    socket.send(packet).map_err(|e| e.to_string())?;
+                }
+            }
         }
         [_, command, path, frequency, destination]
         | [_, command, path, frequency, destination, _]
@@ -906,17 +1030,13 @@ fn run() -> Result<(), String> {
                 .transpose()
                 .map_err(|error| format!("invalid gain: {error}"))?
                 .unwrap_or(19.7);
-            let tuning = args
-                .get(6)
-                .map(|value| serde_json::from_str(value))
-                .transpose()
-                .map_err(|error| format!("invalid active tuning: {error}"))?;
+            let tuning = parse_tuning(args.get(6).map(String::as_str))?;
             let radio_id = args.get(7).map(String::as_str);
             receive_spectrum(&config, radio_id, frequency, destination, gain, tuning)
         }
         _ => Err(format!(
-            "usage:\n  {} validate-config CONFIG.toml\n  {} device-index CONFIG.toml\n  {} serve CONFIG.toml CONTROL_SOCKET\n  {} control CONTROL_SOCKET JSON\n  {} dcp-serve CONFIG.toml CONTROL_SOCKET LISTEN SPECTRUM_DEST TOKEN_FILE\n  {} fm CONFIG.toml CENTER_HZ PCM_DEST [GAIN_DB]\n  {} spectrum CONFIG.toml CENTER_HZ UDP_DEST [GAIN_DB] [TUNING_JSON] [RADIO_ID]",
-            args[0], args[0], args[0], args[0], args[0], args[0], args[0]
+            "usage:\n  {} validate-config CONFIG.toml\n  {} device-index CONFIG.toml\n  {} serve CONFIG.toml CONTROL_SOCKET\n  {} control CONTROL_SOCKET JSON\n  {} dcp-serve CONFIG.toml CONTROL_SOCKET LISTEN SPECTRUM_DEST TOKEN_FILE\n  {} fm CONFIG.toml CENTER_HZ PCM_DEST [GAIN_DB]\n  {} capture CONFIG.toml RADIO_ID CENTER_HZ SECONDS OUTPUT_PREFIX [GAIN_DB]\n  {} nfm CONFIG.toml RADIO_ID CENTER_HZ PCM_DEST [GAIN_DB]\n  {} spectrum CONFIG.toml CENTER_HZ UDP_DEST [GAIN_DB] [TUNING_JSON] [RADIO_ID]",
+            args[0], args[0], args[0], args[0], args[0], args[0], args[0], args[0], args[0]
         )),
     }
 }
@@ -933,6 +1053,14 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn manual_radio_selection_accepts_null_tuning_but_rejects_malformed_metadata() {
+        assert_eq!(super::parse_tuning(None).unwrap(), None);
+        assert_eq!(super::parse_tuning(Some("null")).unwrap(), None);
+        assert!(super::parse_tuning(Some("{}")).is_err());
+        assert!(super::parse_tuning(Some("bad-json")).is_err());
+    }
+
     #[test]
     fn service_http_keeps_bearer_auth_and_native_dcp_version_boundary() {
         use std::{
@@ -1046,5 +1174,29 @@ mod tests {
         let bins = spectrum_bins(&iq, &mut FftPlanner::new()).unwrap();
         assert_eq!(bins.len(), 128);
         assert!(bins.iter().all(|bin| bin.is_finite() && *bin <= 40.0));
+    }
+
+    #[test]
+    fn signed_hackrf_iq_places_a_tone_on_the_correct_side_of_center() {
+        let iq: Vec<u8> = (0..1024)
+            .flat_map(|n| {
+                let phase = 2.0 * std::f32::consts::PI * 128.0 * n as f32 / 1024.0;
+                [
+                    (100.0 * phase.cos()) as i8 as u8,
+                    (100.0 * phase.sin()) as i8 as u8,
+                ]
+            })
+            .collect();
+        let bins =
+            super::spectrum_bins_format(&iq, &mut FftPlanner::new(), &radioman::SampleFormat::Cs8)
+                .unwrap();
+        let peak = bins
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.total_cmp(b.1))
+            .unwrap()
+            .0;
+        assert!((79..=80).contains(&peak), "peak bin was {peak}");
+        assert!(bins[peak] > bins[64] + 40.0);
     }
 }

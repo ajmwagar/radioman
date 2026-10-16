@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
 pub mod dcp;
+pub mod receiver;
 pub mod services;
 
 pub const CONTRACT_VERSION: u32 = 1;

@@ -14,8 +14,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    DeviceIndex, ExperimentOutput, ExperimentRequest, RadioKind, RxRequest, SampleFormat,
-    ServiceCommand, ServiceStatus,
+    DeviceIndex, ExperimentOutput, ExperimentRequest, RxRequest, ServiceCommand, ServiceStatus,
 };
 
 pub const PROVIDER_ID: &str = "radioman";
@@ -297,11 +296,7 @@ impl Projection<'_> {
             .devices
             .radios
             .iter()
-            .filter(|radio| {
-                radio.receive
-                    && matches!(radio.kind, RadioKind::RtlSdr)
-                    && radio.sample_rates_hz.contains(&2_048_000)
-            })
+            .filter(|radio| radio.receive && crate::receiver::spectrum_format(radio).is_ok())
             .collect::<Vec<_>>();
         let available = !radios.is_empty();
         let radio_ids = radios
@@ -400,6 +395,10 @@ impl Projection<'_> {
                     false,
                 )
             })?;
+        let (sample_rate_hz, sample_format) =
+            crate::receiver::spectrum_format(radio).map_err(invalid)?;
+        crate::receiver::validate(radio, center_frequency_hz, gain_db.unwrap_or(19.7))
+            .map_err(invalid)?;
         let experiment = ExperimentRequest {
             owner: "dcp".into(),
             start_at_ms: 0,
@@ -407,8 +406,8 @@ impl Projection<'_> {
                 session_id,
                 radio_id,
                 center_frequency_hz,
-                sample_rate_hz: 2_048_000,
-                sample_format: SampleFormat::Cu8,
+                sample_rate_hz,
+                sample_format,
                 gain_db,
                 ppm: 0,
                 duration_ms: Some(duration_ms),
