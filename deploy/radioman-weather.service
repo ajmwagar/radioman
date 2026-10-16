@@ -1,0 +1,25 @@
+[Unit]
+Description=Radioman NOAA weather radio on the HackRF
+After=network-online.target radioman.service
+Wants=network-online.target
+Requires=radioman.service
+
+[Service]
+Type=simple
+User=radioman
+Group=radioman
+SupplementaryGroups=plugdev
+EnvironmentFile=/etc/radioman/weather.env
+ExecStart=/usr/local/bin/radioman nfm /etc/radioman/radioman.toml ${RADIO_ID} ${FREQUENCY_HZ} ${PCM_DEST} ${GAIN_DB}
+Restart=on-failure
+RestartSec=5
+KillMode=control-group
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/run/radioman
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+
+[Install]
+WantedBy=multi-user.target
