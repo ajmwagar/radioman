@@ -78,6 +78,9 @@ runtime dependency; controls remain revision-bound DCP actions.
 
 HackRF, NOAA weather audio, and L-band IQ capture setup are documented in
 [weather and satellite receive](docs/weather-and-satellite.md).
+The [2026-10-16 receive experiments](docs/radio-experiments-20261016.md) record
+weather comparisons, ADS-B decoding counters, L-band captures, USB recovery,
+and repeatable bounded commands.
 
 ```sh
 cargo check
