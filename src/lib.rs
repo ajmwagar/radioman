@@ -10,6 +10,7 @@ use std::collections::BTreeSet;
 pub mod adsb;
 pub mod dcp;
 pub mod decoder;
+pub mod dsp;
 pub mod location;
 
 pub const CONTRACT_VERSION: u32 = 1;

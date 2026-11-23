@@ -1,0 +1,105 @@
+// Receive-side radio capability for Soil/Spore consumers.
+//
+// The native provider owns device enumeration, USB, the sample clock, DSP, and
+// leased sessions. A consumer can request a receiver, read bounded spectrum or
+// audio blocks, and retune; it cannot name USB endpoints or open a second
+// session around the provider.
+//
+// This is a contract. It does not imply that a device is present, that a
+// session is granted, or that transmit exists. Transmit is deliberately absent.
+package soil:radio@0.1.0;
+
+interface radio {
+    enum kind {
+        rtl-sdr,
+        hackrf,
+        other,
+    }
+
+    enum mode {
+        am,
+        nfm,
+        wfm,
+        usb,
+        lsb,
+        cw,
+    }
+
+    enum sample-format {
+        cu8,
+        cs8,
+        cs16-le,
+        cf32-le,
+    }
+
+    enum error {
+        denied,
+        unavailable,
+        invalid,
+        over-budget,
+        closed,
+        unsupported,
+    }
+
+    record device {
+        id: string,
+        kind: kind,
+        label: string,
+        serial: option<string>,
+        frequency-min-hz: u64,
+        frequency-max-hz: u64,
+        sample-rates-hz: list<u32>,
+        sample-formats: list<sample-format>,
+        receive: bool,
+    }
+
+    record tune-config {
+        center-hz: u64,
+        sample-rate-hz: u32,
+        bandwidth-hz: u32,
+        mode: mode,
+        gain-db: option<f32>,
+    }
+
+    record spectrum-frame {
+        sequence: u64,
+        observed-at-ms: u64,
+        center-hz: u64,
+        span-hz: u32,
+        bins-dbfs: list<f32>,
+    }
+
+    record audio-frame {
+        sequence: u64,
+        observed-at-ms: u64,
+        sample-rate-hz: u32,
+        channels: u8,
+        /// Interleaved f32 frames.
+        samples: list<f32>,
+    }
+
+    resource receiver {
+        /// Read one bounded FFT row. The provider may block briefly for a
+        /// frame, but must not return more than `max-bins`.
+        spectrum: func(max-bins: u32) -> result<spectrum-frame, error>;
+        /// Read one bounded mono/stereo PCM block. A consumer that is not
+        /// draining audio must not stall the spectrum path.
+        audio: func(max-frames: u32) -> result<audio-frame, error>;
+        retune: func(config: tune-config) -> result<_, error>;
+        close: func();
+    }
+
+    /// Enumerate receivers visible to this provider. Discovery is not a grant.
+    enumerate: func() -> result<list<device>, error>;
+
+    /// Open an exclusive receive session.
+    open: func(device-id: string, config: tune-config) -> result<receiver, error>;
+}
+
+world radio-plugin {
+    export radio;
+}
+
+world radio-consumer {
+    import radio;
+}

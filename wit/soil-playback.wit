@@ -1,0 +1,60 @@
+// Playback routing above a host-owned PCM sink.
+//
+// The host owns the clock, ring buffer, device/sink selection, and underrun
+// accounting. A Spore owns only the patch policy: which source feeds which
+// sink, gain, mute, pause, and resume. This is intentionally not an ambient
+// audio-device API.
+package soil:playback@0.1.0;
+
+interface playback {
+    record format {
+        sample-rate-hz: u32,
+        channels: u8,
+    }
+
+    record status {
+        format: format,
+        queued-frames: u32,
+        underruns: u64,
+        latency-ms: u32,
+    }
+
+    enum error {
+        denied,
+        unavailable,
+        invalid,
+        over-budget,
+        closed,
+        unsupported,
+    }
+
+    resource sink {
+        /// Push interleaved f32 frames; returns accepted frame count.
+        write: func(samples: list<f32>) -> result<u32, error>;
+        drain: func(timeout-ms: u32) -> result<_, error>;
+        status: func() -> result<status, error>;
+        close: func();
+    }
+
+    resource route {
+        set-gain: func(db: f32) -> result<_, error>;
+        pause: func() -> result<_, error>;
+        resume: func() -> result<_, error>;
+        close: func();
+    }
+
+    /// Host-selected sink name. Consumers cannot enumerate devices.
+    open-sink: func(name: string, format: format) -> result<sink, error>;
+
+    /// Connect a named source to a sink. The host resolves the source and
+    /// enforces its own capability boundary.
+    connect: func(source: string, sink: string) -> result<route, error>;
+}
+
+world playback-plugin {
+    export playback;
+}
+
+world playback-consumer {
+    import playback;
+}
