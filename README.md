@@ -88,6 +88,34 @@ cargo test
 cargo run -- validate-config ../radioman-pi/config/radioman.toml
 ```
 
+### GPU spectrum plugin
+
+`rf-gpu` is an opt-in `wgpu` front-end for FFTs and live spectrum frames. It
+receives raw interleaved IQ over UDP and emits the same bounded
+`SpectrumFrame` JSON as the CPU spectrum path:
+
+```sh
+cargo run --release --features rf-gpu -- rf-gpu \
+  0.0.0.0:51001 94900000 127.0.0.1:50070 cs8 30
+```
+
+The device side can send raw IQ with the always-available `iq-stream` command:
+
+```sh
+radioman iq-stream /etc/radioman/radioman.toml hackrf 94900000 \
+  192.168.2.74:51001 30
+```
+
+Both sides deliberately use raw interleaved IQ; packet boundaries are not
+sample boundaries. `rf-gpu` accumulates a 1024-sample window and drops stale
+windows under backpressure. Audio demodulation remains local to the device.
+
+The feature is off by default, so the normal Radioman binary does not pull in
+`wgpu`. The GPU boundary is intentionally limited to spectrum/waterfall
+generation; audio demodulation stays on the CPU and real-time path. The
+`SpectrumConsumer` boundary is where a later GPU waterfall texture or ML
+classifier can attach without changing the IQ wire format.
+
 The first hardware milestone is receive-only RTL-SDR. HackRF receive follows;
 transmit is a separate safety-reviewed capability with frequency/power limits,
 short leases, audit receipts, and a host-local enable interlock.

@@ -9,6 +9,8 @@ use std::collections::BTreeSet;
 
 pub mod dcp;
 pub mod receiver;
+#[cfg(feature = "rf-gpu")]
+pub mod rf_gpu;
 pub mod services;
 
 pub const CONTRACT_VERSION: u32 = 1;

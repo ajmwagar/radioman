@@ -838,6 +838,45 @@ fn receive_fm(
     }
 }
 
+fn stream_iq(
+    config: &Config,
+    radio_id: &str,
+    center_frequency_hz: u64,
+    destination: SocketAddr,
+    gain_db: f32,
+) -> Result<(), String> {
+    let radio = config.radio(radio_id)?;
+    let _claim = radioman::receiver::claim(radio)?;
+    let mut child = radioman::receiver::Receiver(
+        radioman::receiver::iq_command(radio, center_frequency_hz, gain_db)?
+            .spawn()
+            .map_err(|error| format!("start IQ receiver: {error}"))?,
+    );
+    let mut stdout = child
+        .0
+        .stdout
+        .take()
+        .ok_or("receiver stdout is unavailable")?;
+    let socket =
+        UdpSocket::bind("0.0.0.0:0").map_err(|error| format!("bind IQ socket: {error}"))?;
+    socket
+        .connect(destination)
+        .map_err(|error| format!("connect IQ socket: {error}"))?;
+    let mut iq = [0_u8; 1400];
+    eprintln!(
+        "radioman: streaming IQ radio={} center={center_frequency_hz}Hz destination={destination}",
+        radio.id
+    );
+    loop {
+        stdout
+            .read_exact(&mut iq)
+            .map_err(|error| format!("read receiver IQ: {error}"))?;
+        socket
+            .send(&iq)
+            .map_err(|error| format!("send IQ datagram: {error}"))?;
+    }
+}
+
 fn parse_tuning(value: Option<&str>) -> Result<Option<radioman::ActiveTuning>, String> {
     value
         .map(serde_json::from_str::<Option<radioman::ActiveTuning>>)
@@ -992,6 +1031,25 @@ fn run() -> Result<(), String> {
                 }
             }
         }
+        [_, command, path, radio_id, frequency, destination]
+        | [_, command, path, radio_id, frequency, destination, _]
+            if command == "iq-stream" =>
+        {
+            let config = read_config(path)?;
+            let frequency = frequency
+                .parse::<u64>()
+                .map_err(|error| format!("invalid IQ stream frequency: {error}"))?;
+            let destination = destination
+                .parse::<SocketAddr>()
+                .map_err(|error| format!("invalid IQ stream destination: {error}"))?;
+            let gain = args
+                .get(6)
+                .map(|value| value.parse::<f32>())
+                .transpose()
+                .map_err(|error| format!("invalid gain: {error}"))?
+                .unwrap_or(20.0);
+            stream_iq(&config, radio_id, frequency, destination, gain)
+        }
         [_, command, path, frequency, destination]
         | [_, command, path, frequency, destination, _]
             if command == "fm" =>
@@ -1010,6 +1068,30 @@ fn run() -> Result<(), String> {
                 .map_err(|error| format!("invalid gain: {error}"))?
                 .unwrap_or(19.7);
             receive_fm(&config, frequency, destination, gain)
+        }
+        #[cfg(feature = "rf-gpu")]
+        [_, command, bind, center, destination, format]
+        | [_, command, bind, center, destination, format, _]
+            if command == "rf-gpu" =>
+        {
+            let center = center
+                .parse::<u64>()
+                .map_err(|error| format!("invalid rf-gpu center frequency: {error}"))?;
+            let format = format.as_str();
+            let fps = args
+                .get(6)
+                .map(|value| value.parse::<u32>())
+                .transpose()
+                .map_err(|error| format!("invalid rf-gpu fps: {error}"))?;
+            let config = radioman::rf_gpu::RfGpuConfig::parse(
+                bind,
+                destination,
+                center,
+                2_000_000,
+                format,
+                fps,
+            )?;
+            radioman::rf_gpu::run(config)
         }
         [_, command, path, frequency, destination]
         | [_, command, path, frequency, destination, _]
@@ -1035,8 +1117,18 @@ fn run() -> Result<(), String> {
             receive_spectrum(&config, radio_id, frequency, destination, gain, tuning)
         }
         _ => Err(format!(
-            "usage:\n  {} validate-config CONFIG.toml\n  {} device-index CONFIG.toml\n  {} serve CONFIG.toml CONTROL_SOCKET\n  {} control CONTROL_SOCKET JSON\n  {} dcp-serve CONFIG.toml CONTROL_SOCKET LISTEN SPECTRUM_DEST TOKEN_FILE\n  {} fm CONFIG.toml CENTER_HZ PCM_DEST [GAIN_DB]\n  {} capture CONFIG.toml RADIO_ID CENTER_HZ SECONDS OUTPUT_PREFIX [GAIN_DB]\n  {} nfm CONFIG.toml RADIO_ID CENTER_HZ PCM_DEST [GAIN_DB]\n  {} spectrum CONFIG.toml CENTER_HZ UDP_DEST [GAIN_DB] [TUNING_JSON] [RADIO_ID]",
-            args[0], args[0], args[0], args[0], args[0], args[0], args[0], args[0], args[0]
+            "usage:\n  {} validate-config CONFIG.toml\n  {} device-index CONFIG.toml\n  {} serve CONFIG.toml CONTROL_SOCKET\n  {} control CONTROL_SOCKET JSON\n  {} dcp-serve CONFIG.toml CONTROL_SOCKET LISTEN SPECTRUM_DEST TOKEN_FILE\n  {} fm CONFIG.toml CENTER_HZ PCM_DEST [GAIN_DB]\n  {} capture CONFIG.toml RADIO_ID CENTER_HZ SECONDS OUTPUT_PREFIX [GAIN_DB]\n  {} nfm CONFIG.toml RADIO_ID CENTER_HZ PCM_DEST [GAIN_DB]\n  {} iq-stream CONFIG.toml RADIO_ID CENTER_HZ UDP_DEST [GAIN_DB]\n  {} spectrum CONFIG.toml CENTER_HZ UDP_DEST [GAIN_DB] [TUNING_JSON] [RADIO_ID]\n  {} rf-gpu BIND CENTER_HZ UDP_DEST {{cs8|cu8|cs16le}} [FPS] (requires --features rf-gpu)",
+            args[0],
+            args[0],
+            args[0],
+            args[0],
+            args[0],
+            args[0],
+            args[0],
+            args[0],
+            args[0],
+            args[0],
+            args[0]
         )),
     }
 }

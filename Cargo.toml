@@ -6,6 +6,10 @@ rust-version = "1.89"
 license = "MIT OR Apache-2.0"
 publish = false
 
+[features]
+default = []
+rf-gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
+
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -17,6 +21,9 @@ sha2 = "0.10"
 time = { version = "0.3", features = ["formatting"] }
 tiny_http = "0.12"
 subtle = "2"
+wgpu = { version = "22", optional = true }
+pollster = { version = "0.4", optional = true }
+bytemuck = { version = "1", features = ["derive"], optional = true }
 
 [dev-dependencies]
 tempfile = "3"
