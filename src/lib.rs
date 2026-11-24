@@ -9,6 +9,8 @@ use std::collections::BTreeSet;
 
 pub mod dcp;
 pub mod receiver;
+#[cfg(feature = "rf-adsb")]
+pub mod rf_adsb;
 #[cfg(feature = "rf-gpu")]
 pub mod rf_gpu;
 pub mod services;

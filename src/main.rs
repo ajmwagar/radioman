@@ -1069,6 +1069,22 @@ fn run() -> Result<(), String> {
                 .unwrap_or(19.7);
             receive_fm(&config, frequency, destination, gain)
         }
+        #[cfg(feature = "rf-adsb")]
+        [_, command, path, radio_id, destination]
+        | [_, command, path, radio_id, destination, _]
+            if command == "rf-adsb" =>
+        {
+            let config = read_config(path)?;
+            let radio = config.radio(radio_id)?;
+            let gain = args
+                .get(5)
+                .map(|value| value.parse::<f32>())
+                .transpose()
+                .map_err(|error| format!("invalid ADS-B gain: {error}"))?
+                .unwrap_or(20.0);
+            let config = radioman::rf_adsb::AdsbConfig::parse(destination, gain)?;
+            radioman::rf_adsb::run(radio, config)
+        }
         #[cfg(feature = "rf-gpu")]
         [_, command, bind, center, destination, format]
         | [_, command, bind, center, destination, format, _]
@@ -1117,7 +1133,8 @@ fn run() -> Result<(), String> {
             receive_spectrum(&config, radio_id, frequency, destination, gain, tuning)
         }
         _ => Err(format!(
-            "usage:\n  {} validate-config CONFIG.toml\n  {} device-index CONFIG.toml\n  {} serve CONFIG.toml CONTROL_SOCKET\n  {} control CONTROL_SOCKET JSON\n  {} dcp-serve CONFIG.toml CONTROL_SOCKET LISTEN SPECTRUM_DEST TOKEN_FILE\n  {} fm CONFIG.toml CENTER_HZ PCM_DEST [GAIN_DB]\n  {} capture CONFIG.toml RADIO_ID CENTER_HZ SECONDS OUTPUT_PREFIX [GAIN_DB]\n  {} nfm CONFIG.toml RADIO_ID CENTER_HZ PCM_DEST [GAIN_DB]\n  {} iq-stream CONFIG.toml RADIO_ID CENTER_HZ UDP_DEST [GAIN_DB]\n  {} spectrum CONFIG.toml CENTER_HZ UDP_DEST [GAIN_DB] [TUNING_JSON] [RADIO_ID]\n  {} rf-gpu BIND CENTER_HZ UDP_DEST {{cs8|cu8|cs16le}} [FPS] (requires --features rf-gpu)",
+            "usage:\n  {} validate-config CONFIG.toml\n  {} device-index CONFIG.toml\n  {} serve CONFIG.toml CONTROL_SOCKET\n  {} control CONTROL_SOCKET JSON\n  {} dcp-serve CONFIG.toml CONTROL_SOCKET LISTEN SPECTRUM_DEST TOKEN_FILE\n  {} fm CONFIG.toml CENTER_HZ PCM_DEST [GAIN_DB]\n  {} capture CONFIG.toml RADIO_ID CENTER_HZ SECONDS OUTPUT_PREFIX [GAIN_DB]\n  {} nfm CONFIG.toml RADIO_ID CENTER_HZ PCM_DEST [GAIN_DB]\n  {} iq-stream CONFIG.toml RADIO_ID CENTER_HZ UDP_DEST [GAIN_DB]\n  {} spectrum CONFIG.toml CENTER_HZ UDP_DEST [GAIN_DB] [TUNING_JSON] [RADIO_ID]\n  {} rf-gpu BIND CENTER_HZ UDP_DEST {{cs8|cu8|cs16le}} [FPS] (requires --features rf-gpu)\n  {} rf-adsb CONFIG.toml RADIO_ID UDP_DEST [GAIN_DB] (requires --features rf-adsb)",
+            args[0],
             args[0],
             args[0],
             args[0],

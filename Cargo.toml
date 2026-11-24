@@ -9,6 +9,7 @@ publish = false
 [features]
 default = []
 rf-gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
+rf-adsb = []
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

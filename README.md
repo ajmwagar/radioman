@@ -116,6 +116,21 @@ generation; audio demodulation stays on the CPU and real-time path. The
 `SpectrumConsumer` boundary is where a later GPU waterfall texture or ML
 classifier can attach without changing the IQ wire format.
 
+### Native ADS-B decoder
+
+`rf-adsb` is a feature-gated native Mode S/ADS-B receive path. It owns the RTL
+IQ stream, demodulates 1090 MHz pulses, validates CRC, decodes identification
+and global CPR positions, and emits bounded JSON aircraft events over UDP:
+
+```sh
+cargo run --release --features rf-adsb -- rf-adsb \
+  /etc/radioman/radioman.toml rtl-sdr 192.168.2.74:50100 24
+```
+
+The event stream contains `icao`, `raw_hex`, callsign, altitude, and
+latitude/longitude when an even/odd CPR pair has been received. This path does
+not produce audio; AIS remains a separate future decoder.
+
 The first hardware milestone is receive-only RTL-SDR. HackRF receive follows;
 transmit is a separate safety-reviewed capability with frequency/power limits,
 short leases, audit receipts, and a host-local enable interlock.
