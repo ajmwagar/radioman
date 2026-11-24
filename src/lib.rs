@@ -11,6 +11,8 @@ pub mod dcp;
 pub mod receiver;
 #[cfg(feature = "rf-adsb")]
 pub mod rf_adsb;
+#[cfg(feature = "rf-ais")]
+pub mod rf_ais;
 #[cfg(feature = "rf-gpu")]
 pub mod rf_gpu;
 pub mod services;

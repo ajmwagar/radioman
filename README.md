@@ -129,7 +129,22 @@ cargo run --release --features rf-adsb -- rf-adsb \
 
 The event stream contains `icao`, `raw_hex`, callsign, altitude, and
 latitude/longitude when an even/odd CPR pair has been received. This path does
-not produce audio; AIS remains a separate future decoder.
+not produce audio.
+
+### Native AIS decoder
+
+`rf-ais` is a feature-gated dual-channel AIS receive path. It downconverts the
+two 25 kHz AIS channels around 162 MHz, FM-discriminates GMSK, recovers the bit
+clock, reverses NRZI, removes HDLC stuffing, validates the FCS, and emits JSON
+vessel events:
+
+```sh
+cargo run --release --features rf-ais -- rf-ais \
+  /etc/radioman/radioman.toml rtl-sdr/00000001 192.168.2.74:50101 24
+```
+
+The decoder reports message type, MMSI, payload, and position for message types
+1–3. It is independent of the ADS-B path and can be enabled separately.
 
 The first hardware milestone is receive-only RTL-SDR. HackRF receive follows;
 transmit is a separate safety-reviewed capability with frequency/power limits,
