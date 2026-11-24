@@ -386,12 +386,12 @@ pub fn run(radio: &RadioDescriptor, config: AdsbConfig) -> Result<(), String> {
             if let Some(object) = value.as_object_mut() {
                 object.insert("sequence".into(), sequence.into());
             }
+            let encoded = serde_json::to_vec(&value)
+                .map_err(|error| format!("encode ADS-B event: {error}"))?;
             socket
-                .send(
-                    &serde_json::to_vec(&value)
-                        .map_err(|error| format!("encode ADS-B event: {error}"))?,
-                )
+                .send(&encoded)
                 .map_err(|error| format!("send ADS-B event: {error}"))?;
+            println!("{}", String::from_utf8_lossy(&encoded));
         }
     }
 }

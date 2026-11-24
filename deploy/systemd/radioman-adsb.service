@@ -1,0 +1,27 @@
+[Unit]
+Description=Radioman HackRF ADS-B receiver and JSON log
+After=network-online.target
+Wants=network-online.target
+# The HackRF is exclusive. Starting this unit releases the RF console bridge.
+Conflicts=rfscoutd.service
+
+[Service]
+Type=simple
+User=radioman
+Group=radioman
+SupplementaryGroups=plugdev
+ExecStart=/usr/local/bin/radioman-rx rf-adsb /etc/radioman/radioman.toml hackrf/78d063dc29876f67 127.0.0.1:50100 28
+Restart=always
+RestartSec=5
+StandardOutput=append:/var/log/radioman/adsb.jsonl
+StandardError=append:/var/log/radioman/adsb.error.log
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/run/radioman /var/log/radioman
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+KillMode=control-group
+
+[Install]
+WantedBy=multi-user.target
